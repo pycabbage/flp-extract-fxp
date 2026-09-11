@@ -5,6 +5,18 @@ edition = "2024"
 description = "Extract Serum 1 presets (.fxp) embedded in FL Studio project (.flp) files, loadable by Serum 2"
 license = "MIT"
 
+# Library + binary in one crate: the `rlib` is consumed by the CLI binary
+# (src/main.rs) and by tests, the `cdylib` is what wasm-pack turns into the
+# browser module (see src/web.rs).
+[lib]
+name = "flp_extract_fxp"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
+
+# WebAssembly bindings. Target-specific dependency, so native CLI builds
+# never fetch or link wasm-bindgen; src/web.rs is cfg-gated identically.
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))'.dependencies]
+wasm-bindgen = "0.2"
