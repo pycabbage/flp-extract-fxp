@@ -9,7 +9,4 @@ export default defineConfig({
   resolve: {
     tsconfigPaths: true,
   },
-  optimizeDeps: {
-    exclude: ["flp_extract_fxp"],
-  },
 })
