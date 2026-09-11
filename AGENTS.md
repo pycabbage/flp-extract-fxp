@@ -8,8 +8,14 @@ One Cargo crate (`flp-extract-fxp`) that is simultaneously:
   that powers the React frontend in `front/` (deployed to GitHub Pages).
 
 Both surfaces share the same core logic in `src/core.rs`, `src/flp.rs`,
-`src/serum.rs`, `src/fxp.rs`. `src/web.rs` is `#[cfg]`-gated to wasm targets
-only, so native `cargo build`/`cargo test` never touch it.
+`src/serum.rs`, `src/fxp.rs`, plus the Serum 1 → Serum 2 conversion stack:
+`src/s1state.rs` (Serum 1 state parser), `src/importer.rs` (faithful port of
+Serum2.vst3's `s1state_load`), `src/s2tree.rs` + `src/serum2state.rs`
+(canonical CBOR + XferJson container), `src/flpconv.rs` (FLP event-213
+rewrite), and `src/s2tables.rs` — **GENERATED** by `tools/gen_s2tables.py`
+from `docs/data/*.json`; never hand-edit it, rerun the generator instead.
+`src/web.rs` is `#[cfg]`-gated to wasm targets only, so native
+`cargo build`/`cargo test` never touch it.
 
 ## Rust CLI (repo root)
 
@@ -22,8 +28,13 @@ only, so native `cargo build`/`cargo test` never touch it.
   job running `cargo test`/`clippy`/`fmt` (the only workflow is
   `.github/workflows/pages.yml`, which just builds the wasm+frontend and
   deploys). Run `cargo test` yourself before considering work done.
-- Only dependencies are `clap` and `flate2` (native); `wasm-bindgen` is a
-  target-specific dep for `wasm32-unknown-unknown` only.
+- Only dependencies are `clap`, `flate2` and `md-5` (native); `wasm-bindgen`
+  is a target-specific dep for `wasm32-unknown-unknown` only, `ruzstd` is a
+  dev-dependency (test-only zstd decoding). Keep new dependencies wasm32-safe
+  — the conversion stack must compile identically for both targets.
+- CLI subcommands: `list`, `extract`, `validate`, and
+  `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum 1 instances
+  inside an FLP as Serum 2 instances; see `docs/flp-conversion.md`).
 
 ## Frontend + wasm (`front/`)
 
@@ -49,20 +60,34 @@ only, so native `cargo build`/`cargo test` never touch it.
   **unset locally** (so `pnpm dev`/`pnpm build` serve from `/`); only
   `.github/workflows/pages.yml` sets `VITE_BASE=/flp-extract-fxp/` for the
   GitHub Pages build. It also excludes `flp_extract_fxp` from
-  `optimizeDeps` (the wasm module must not be pre-bundled by Vite).
+  `optimizeDeps` (the wasm module must not be pre-bundled by Vite) and sets
+  `server.fs.allow` (workspace root + `..`) so `pnpm dev` can import the
+  generated `../pkg` package — dev-only, no effect on the Pages build.
 - UI is shadcn/radix components already generated under
   `front/src/components/ui/` — reuse them rather than re-adding via the
   `shadcn` CLI.
 
 ## Format/domain reference docs
 
-Before touching FLP/Serum parsing or `.fxp` construction (`src/flp.rs`,
-`src/serum.rs`, `src/fxp.rs`), read the relevant doc — they are the
-verified source of truth (static reverse-engineering + real-file
-calibration + dynamic Serum 2 verification), not just design notes:
+Before touching FLP/Serum parsing, `.fxp` construction, or the conversion
+stack (`src/flp.rs`, `src/serum.rs`, `src/fxp.rs`, `src/s1state.rs`,
+`src/importer.rs`, `src/s2tree.rs`, `src/serum2state.rs`, `src/flpconv.rs`),
+read the relevant doc — they are the verified source of truth (static
+reverse-engineering + real-file calibration + dynamic Serum 2 verification),
+not just design notes:
 - `docs/serum-fxp-format.md` — byte-level Serum 1 `.fxp` spec.
 - `docs/serum2-importer-analysis.md` — Serum 2's import validation rules.
-- `docs/serum2-dynamic-verification.md` — live VST3-host verification.
+- `docs/s1-to-s2-mapping.md` + `docs/s2-runtime-tables.md` — the real Serum 1
+  → Serum 2 importer (`s1state_load`, RVA 0x4DABC0) and its runtime-dumped
+  conversion tables (`docs/data/*.json`).
+- `docs/flp-serum2-conversion.md` — FLP event-213 byte-level rules for Serum 1
+  vs Serum 2 instances (the rewrite recipe).
+- `docs/flp-conversion.md` — the shipped FLP conversion feature (pipeline,
+  surfaces, verification, limitations).
+- `docs/serum2-dynamic-verification.md` — live VST3-host verification. Read
+  the CORRECTION section at the top first: `setState` **rejects** Serum 1
+  data (the old "dynamically verified acceptance" conclusion was a false
+  positive); the real import path is `s1state_load`.
 
 Key constraints the code encodes (don't "fix" these without re-checking the
 docs above):
@@ -75,12 +100,26 @@ docs above):
   `XferJson`-prefixed state, not the Serum 1 chunk layout) — only counted.
 - Zip-packed FLPs (`PK`-prefixed "loop package" exports) are unsupported by
   design; the FLP must be extracted first.
+- `src/importer.rs` correctness is proven by **byte-identity tests** against
+  `tests/fixtures/golden_s2/*.bin` (golden states produced by the REAL
+  importer, called at runtime). Do not "simplify" importer logic without
+  re-running those tests.
+- Converted processor states use **raw-block zstd frames** (uncompressed) on
+  purpose — plugin-accepted; the goldens use libzstd level 3, both are
+  standard frames. Smaller frames are future work, not a bug to fix.
 
 ## Tests
 
 - `tests/fixtures/extracted_serum1.fxp` is a real extracted fixture used by
   `validates_real_fixture`; don't regenerate/edit it casually — it pins
   real-world validation behavior.
+- `tests/fixtures/serina1/*.fxp` (5 real Serum 1 presets) and
+  `tests/fixtures/serina1.flp` (real project: 5 Serum 1 + 1 Serum 2 instance)
+  drive the converter tests.
+- `tests/fixtures/golden_s2/0N_processor_state.bin` are golden converted
+  processor states produced by the REAL importer (called at runtime) and
+  accepted by the real plugin — ground truth for `golden_byte_identical_*`;
+  don't regenerate/edit them casually.
 - `assets/` is gitignored and not present in the repo (used locally to hold
   real-world Serum fxp samples during format research) — don't expect it
   to exist or add tests that depend on it.

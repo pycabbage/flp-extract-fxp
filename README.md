@@ -1,10 +1,11 @@
 # flp-extract-fxp
 
-FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum 1 プリセット** を取り出し、**Serum 2 で読み込める .fxp** として出力する CLI ツールです。
+FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum 1 プリセット** を取り出して **Serum 2 で読み込める .fxp** として出力し、さらに **FLP 内の Serum 1 インスタンスを Serum 2 インスタンスへ一括変換**できる CLI ツールです。
 
 - FLP 内の Serum (VST3) プラグイン状態から Serum 1 プリセットチャンクを復元
-- Serum 2 の Serum-1 インポートチェック (静的逆解析 + 動的検証済み、下記参照) を満たす fxp を生成
+- Serum 2 の Serum-1 インポートチェック (静的逆解析、下記参照) を満たす fxp を生成
 - 書き出し前にバリデーションし、Serum 2 が拒否するファイルは既定で出力しない
+- `convert`: FLP 内の Serum 1 インスタンスを変換済み Serum 2 インスタンスに書き換えた FLP を生成 (下記参照)
 
 ## ビルド
 
@@ -12,7 +13,7 @@ FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum
 cargo build --release
 ```
 
-実行ファイル: `target/release/flp-extract-fxp` (Windows では `.exe`)。依存は clap 4 と flate2 のみ。
+実行ファイル: `target/release/flp-extract-fxp` (Windows では `.exe`)。依存は clap 4、flate2、md-5。
 
 ## 使い方
 
@@ -47,6 +48,23 @@ flp-extract-fxp validate preset.fxp
 ```
 
 Serum 2 の Serum-1 インポータと同じ規則で検査し、`PASS` / `FAIL` とプリセット名を表示します。FAIL の場合は終了コード 1。拡張子が `.fxp` でない場合も FAIL になります (Serum 2 は `.fxp` 名のときしかインポートを提示しないため)。
+
+### `convert` — FLP 内の Serum 1 を Serum 2 へ一括変換
+
+```sh
+flp-extract-fxp convert "path/to/project.flp"
+flp-extract-fxp convert --out converted.flp a.flp
+flp-extract-fxp convert --dry-run a.flp
+```
+
+| フラグ | 意味 |
+|---|---|
+| `-o`, `--out <FILE>` | 出力 FLP パス。既定は `<入力名>_serum2.flp` (FLP と同じ場所)。単一入力時のみ指定可 |
+| `--dry-run` | 変換計画だけ表示して書き込まない |
+
+FLP 内の Serum 1 (シンセ) インスタンスごとにプリセット状態を Serum 2 形式へ完全変換し、プラグインスロットを Serum 2 に書き換えます。変換後の FLP を FL Studio で開くと Serum 2 が既に読み込まれた状態になり、手作業のプラグイン差し替え + fxp インポートが不要になります。ウェーブテーブルデータは変換後の状態に埋め込まれるため、追加ファイルは不要です。
+
+再生には実際の Serum 2 (VST3) のインストールが必要です。Web UI にも同じ変換があり、「Convert to Serum 2」ボタンでブラウザ内で変換し `<名前>-serum2.flp` としてダウンロードできます。パイプラインと検証方法の詳細は [docs/flp-conversion.md](docs/flp-conversion.md) を参照してください。
 
 ## 出力ファイル名
 
@@ -103,7 +121,7 @@ Serum 2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外で
 
 1. **静的逆解析**: `Serum2.vst3` 2.0.23 の fxp インポート経路を逆アセンブルし、全チェック項目を列挙 → [docs/serum2-importer-analysis.md](docs/serum2-importer-analysis.md)
 2. **実ファイル較正**: 公開リポジトリから収集した実物 Serum 1 fxp 25 ファイル (2015–2026 年) で形式を検証 → [docs/serum-fxp-format.md](docs/serum-fxp-format.md)
-3. **動的検証**: 最小 VST3 ホストで実際の Serum2.vst3 を初期化し、`IComponent::setComponentState` に (a) Serum 2 ネイティブ状態 (受諾、サニティ)、(b) 本ツールが抽出した fxp (**受諾**、33,908 バイトの Serum 2 状態に変換)、(c) 同一プリセットの素の Serum 1 チャンク (受諾、(b) とバイト一致の結果状態) を与え、抽出物が本物の Serum 2 に読み込まれることを確認 → [docs/serum2-dynamic-verification.md](docs/serum2-dynamic-verification.md)
+3. **動的検証**: 最小 VST3 ホストで実際の Serum2.vst3 を初期化して状態を検査。`IComponent::setComponentState` は Serum 2 ネイティブ状態を受諾するが (サニティ)、Serum 1 の fxp/チャンクを与えると **kResultFalse で拒否し、状態は無変化** です (初回実験の「受諾」は誤判定 — 同一コンポーネントに先行して読み込んだネイティブ状態の再シリアライズだった。訂正の全文は [docs/serum2-dynamic-verification.md](docs/serum2-dynamic-verification.md) 冒頭)。Serum 1 → Serum 2 の実変換経路は内部関数 `s1state_load` (RVA 0x4DABC0) で、これをハーネスから直接呼び出して得た 5 プリセット分の変換結果はすべて実機の `setState` で受諾され、ロード後の状態が再インポート結果とバイト一致しました → [docs/s1-to-s2-mapping.md](docs/s1-to-s2-mapping.md)。`convert` 機能の検証 (変換結果と実インポータ出力のバイト一致 + 実機受諾) は [docs/flp-conversion.md](docs/flp-conversion.md) を参照してください。
 
 さらに、実 FLP からの抽出物すべてが `validate` で PASS することを確認しています。
 
@@ -112,6 +130,7 @@ Serum 2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外で
 - **zipped loop package 非対応**: 先頭が `PK` の ZIP 梱包 FLP は読めません。中の .flp を先に展開してください
 - **VST2 / VstW はベストエフォート**: VST2 ラッパー (`VstW`) 内の `CcnK` プリセットは探索して復元しますが、全レイアウトは検証していません
 - **Serum 2 インスタンスは抽出しない**: 件数の報告のみ行います (Serum 2 は XferJson 状態を使うため対象外)
+- **`convert` の制限**: 新形式の Serum 1 プリセット (172,736 バイト状態) のみ変換。旧形式 (2015 年頃) のプリセットは変換せず報告、Serum FX インスタンスは対象外。詳細は [docs/flp-conversion.md](docs/flp-conversion.md)
 
 ## テスト
 
@@ -120,3 +139,5 @@ cargo test
 ```
 
 ユニットテスト (FLP パーサ / 状態解析 / fxp 構築・検証) に加え、合成 FLP からの `extract` → `validate` を実行する統合テスト (`tests/integration.rs`) と、実フィクスチャ fxp の検証テストを含みます。
+
+`convert` は 5 プリセット分の golden 変換状態 (`tests/fixtures/golden_s2/`、実インポータが生成したもの) とのバイト一致テストと、実プロジェクト (`tests/fixtures/serina1.flp`) を変換した FLP の再スキャン / 差分テストで検証します。

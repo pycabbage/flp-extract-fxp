@@ -16,8 +16,15 @@
 
 pub mod core;
 pub mod flp;
+pub mod flpconv;
 pub mod fxp;
 pub mod serum;
+
+pub mod importer;
+pub mod s1state;
+pub mod s2tables;
+pub mod s2tree;
+pub mod serum2state;
 
 #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
 pub mod web;

@@ -1,5 +1,26 @@
 # Serum 2 Dynamic Verification — Findings (2026-09-11)
 
+## CORRECTION (2026-09-12)
+
+The §"Conclusion" below ("**YES — dynamically verified**") is **RETRACTED** — it was a false positive.
+
+Forensic re-analysis of the recorded state bytes plus fresh experiments on the same Serum2.vst3 2.0.23 established:
+
+- `IComponent::setState` **rejects every form of Serum 1 data** (fxp or raw chunk): it returns raw code 1 — a failure code (`kResultFalse`), not the "success-ish" code assumed in the notes below — and **leaves the component state untouched**.
+- The observed "changed state" (33,908 B, hash `837c23ce...`) reported for (b)/(c) was the **native Serum 2 state that had been loaded earlier in the same component instance** (result (a)'s `state_02` processor state) being re-serialized by the plugin. The fxp/chunk `setState` calls were silent no-ops.
+
+Deterministic proof list:
+
+1. (b) and (c) fed **different** Serum 1 presets (the `05_BS - YUKIYANAGI...` fxp vs the `state_06` chunk), yet both reported byte-identical post-states (same fnv `faabaf5200c77d54`, same hash field) — impossible for two real imports of different presets; both were re-serializations of the same previously loaded native state.
+2. A name-marker-patched fxp left **no trace** in the post-state.
+3. Fresh component instances fed **only** Serum 1 data keep the init state (1,252 B, hash `75982fcd...`) untouched.
+
+What still stands: the harness notes (stream-seek bug), the vtable slot maps, the IEditController findings, and the XferJson container description below. Result (a) (native state accepted, kResultOk) also stands.
+
+What was established later: Serum 2's real Serum 1 import path is the **internal function `s1state_load` (RVA 0x4DABC0)**, never invoked through `setState` — see `docs/s1-to-s2-mapping.md` (static RE), `docs/s2-runtime-tables.md` (runtime-dumped conversion tables), and `docs/flp-conversion.md` (the offline converter built on it; dynamically verified by calling `s1state_load` directly and by feeding its output to real Serum 2 instances via `setState`).
+
+---
+
 ## Goal
 Prove dynamically that Xfer Serum 2 (VST3 at `C:\Program Files\Common Files\VST3\Serum2.vst3\Contents\x86_64-win\Serum2.vst3`) accepts extracted Serum 1 preset data via its VST3 state interface (`IComponent::setState` = setComponentState).
 

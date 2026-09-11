@@ -1,0 +1,243 @@
+{
+ "table_rva": 10618912,
+ "id_rule": "id = index + 1",
+ "count": 59,
+ "entries": [
+  {
+   "id": 1,
+   "name": "Mod Wheel"
+  },
+  {
+   "id": 2,
+   "name": "Env 1"
+  },
+  {
+   "id": 3,
+   "name": "Env 2"
+  },
+  {
+   "id": 4,
+   "name": "Env 3"
+  },
+  {
+   "id": 5,
+   "name": "Env 4"
+  },
+  {
+   "id": 6,
+   "name": "LFO 1"
+  },
+  {
+   "id": 7,
+   "name": "LFO 2"
+  },
+  {
+   "id": 8,
+   "name": "LFO 3"
+  },
+  {
+   "id": 9,
+   "name": "LFO 4"
+  },
+  {
+   "id": 10,
+   "name": "LFO 5"
+  },
+  {
+   "id": 11,
+   "name": "LFO 6"
+  },
+  {
+   "id": 12,
+   "name": "LFO 7"
+  },
+  {
+   "id": 13,
+   "name": "LFO 8"
+  },
+  {
+   "id": 14,
+   "name": "LFO 9"
+  },
+  {
+   "id": 15,
+   "name": "LFO 10"
+  },
+  {
+   "id": 16,
+   "name": "Velo"
+  },
+  {
+   "id": 17,
+   "name": "Note#"
+  },
+  {
+   "id": 18,
+   "name": "Aftertouch"
+  },
+  {
+   "id": 19,
+   "name": "Poly Aftertch"
+  },
+  {
+   "id": 20,
+   "name": "Noise OSC"
+  },
+  {
+   "id": 21,
+   "name": "NoteOn Rand1"
+  },
+  {
+   "id": 22,
+   "name": "NoteOn Rand2"
+  },
+  {
+   "id": 23,
+   "name": "NoteOn Alt."
+  },
+  {
+   "id": 24,
+   "name": "NoteOn Alt.2"
+  },
+  {
+   "id": 25,
+   "name": "Macro 1"
+  },
+  {
+   "id": 26,
+   "name": "Macro 2"
+  },
+  {
+   "id": 27,
+   "name": "Macro 3"
+  },
+  {
+   "id": 28,
+   "name": "Macro 4"
+  },
+  {
+   "id": 29,
+   "name": "Macro 5"
+  },
+  {
+   "id": 30,
+   "name": "Macro 6"
+  },
+  {
+   "id": 31,
+   "name": "Macro 7"
+  },
+  {
+   "id": 32,
+   "name": "Macro 8"
+  },
+  {
+   "id": 33,
+   "name": "Pitch Bend"
+  },
+  {
+   "id": 34,
+   "name": "Expr X (Pan)"
+  },
+  {
+   "id": 35,
+   "name": "Expr Y (Timbre)"
+  },
+  {
+   "id": 36,
+   "name": "Expr Z (Press.)"
+  },
+  {
+   "id": 37,
+   "name": "Release Velo"
+  },
+  {
+   "id": 38,
+   "name": "Fixed"
+  },
+  {
+   "id": 39,
+   "name": "LFO 1 Y"
+  },
+  {
+   "id": 40,
+   "name": "LFO 2 Y"
+  },
+  {
+   "id": 41,
+   "name": "LFO 3 Y"
+  },
+  {
+   "id": 42,
+   "name": "LFO 4 Y"
+  },
+  {
+   "id": 43,
+   "name": "LFO 5 Y"
+  },
+  {
+   "id": 44,
+   "name": "LFO 6 Y"
+  },
+  {
+   "id": 45,
+   "name": "LFO 7 Y"
+  },
+  {
+   "id": 46,
+   "name": "LFO 8 Y"
+  },
+  {
+   "id": 47,
+   "name": "LFO 9 Y"
+  },
+  {
+   "id": 48,
+   "name": "LFO 10 Y"
+  },
+  {
+   "id": 49,
+   "name": "OSC A"
+  },
+  {
+   "id": 50,
+   "name": "OSC B"
+  },
+  {
+   "id": 51,
+   "name": "OSC C"
+  },
+  {
+   "id": 52,
+   "name": "SUB OSC"
+  },
+  {
+   "id": 53,
+   "name": "Filter 1"
+  },
+  {
+   "id": 54,
+   "name": "Filter 2"
+  },
+  {
+   "id": 55,
+   "name": "Active Voices"
+  },
+  {
+   "id": 56,
+   "name": "Voice Mod 1"
+  },
+  {
+   "id": 57,
+   "name": "Voice Mod 2"
+  },
+  {
+   "id": 58,
+   "name": "Voice Index"
+  },
+  {
+   "id": 59,
+   "name": "NoteOn Rand (Discrete)"
+  }
+ ]
+}

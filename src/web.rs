@@ -9,6 +9,8 @@
 //!   instance (same ordering as [`scan_flp`]).
 //! - [`validate_fxp_bytes`]: run the Serum 2 import checks on raw bytes and
 //!   return the report as JSON.
+//! - [`convert_flp`]: rewrite every Serum 1 synth instance in place as a
+//!   Serum 2 instance and return the converted FLP bytes plus a report.
 //!
 //! Per-instance conversion failures never abort a scan; they are reported
 //! as a JSON string array via [`ScanReport::failed_json`]. Duplicates are
@@ -23,6 +25,7 @@ use std::collections::HashSet;
 use wasm_bindgen::prelude::*;
 
 use crate::core::{self, Instance};
+use crate::flpconv::{self, BundleSource};
 use crate::fxp;
 
 /// Escape a string for embedding inside a JSON document.
@@ -348,4 +351,152 @@ pub fn validate_fxp_bytes(data: &[u8]) -> Result<String, JsValue> {
         report.is_ok(),
         issues.join(",")
     ))
+}
+
+/// Convert every Serum 1 synth instance in the FLP to a Serum 2 instance.
+///
+/// The orchestration mirrors the CLI's `convert` command: plan via
+/// [`flpconv::scan_convertible`], build one Serum 2 bundle per instance
+/// through [`flpconv::RealSource::embedded`] (importer + embedded templates),
+/// then splice everything back with [`flpconv::apply`]. Serum FX instances
+/// are deliberately left untouched (reported as warnings).
+///
+/// Per-instance conversion failures are never fatal: the instance stays
+/// unconverted and the reason is added to `warnings_json`.
+#[wasm_bindgen]
+pub struct ConvertReport {
+    converted_count: u32,
+    flp: Vec<u8>,
+    warnings_json: String,
+    details_json: String,
+}
+
+#[wasm_bindgen]
+impl ConvertReport {
+    /// Number of Serum 1 instances rewritten as Serum 2.
+    #[wasm_bindgen(getter)]
+    pub fn converted_count(&self) -> u32 {
+        self.converted_count
+    }
+
+    /// The converted FLP bytes (ready to save as a new `.flp`).
+    pub fn flp(&self) -> Vec<u8> {
+        self.flp.clone()
+    }
+
+    /// Warnings as an already-serialized JSON string array (per-instance
+    /// failures, Serum FX instances left untouched).
+    #[wasm_bindgen(getter)]
+    pub fn warnings_json(&self) -> String {
+        self.warnings_json.clone()
+    }
+
+    /// Per-instance details as an already-serialized JSON array of
+    /// `{channel, channelName, presetName, payloadLen, notes:[...]}`.
+    #[wasm_bindgen(getter)]
+    pub fn details_json(&self) -> String {
+        self.details_json.clone()
+    }
+}
+
+/// Convert an FLP to Serum 2 instances (see [`ConvertReport`]).
+///
+/// `data` are the raw `.flp` bytes. Unparseable input (zip archive, missing
+/// `FLhd`, bookkeeping mismatch, ...) rejects with a human-readable
+/// message; instances that fail to convert individually only produce a
+/// warning and are left as Serum 1.
+#[wasm_bindgen]
+pub fn convert_flp(data: &[u8]) -> Result<ConvertReport, JsValue> {
+    let (plans, mut warnings) =
+        flpconv::scan_convertible_detailed(data).map_err(|e| JsValue::from_str(&e))?;
+    let (instances, _stats) =
+        core::scan_serum_instances(data).map_err(|e| JsValue::from_str(&e))?;
+    // The core scan also reports Serum FX instances, which the planner
+    // deliberately leaves untouched — drop them so the two lists line up
+    // (same bookkeeping check as the CLI).
+    let instances: Vec<Instance> = instances
+        .into_iter()
+        .filter(|i| !i.plugin_name.eq_ignore_ascii_case("serum fx"))
+        .collect();
+    if instances.len() != plans.len() {
+        return Err(JsValue::from_str(&format!(
+            "instance bookkeeping mismatch: {} convertible plans vs {} scanned Serum 1 chunks",
+            plans.len(),
+            instances.len()
+        )));
+    }
+
+    let mut source = flpconv::RealSource::embedded();
+    let mut bundles: Vec<Option<flpconv::Serum2Bundle>> = Vec::with_capacity(plans.len());
+    for (i, (plan, inst)) in plans.iter().zip(&instances).enumerate() {
+        if plan.channel != inst.channel
+            || plan.channel_name != inst.channel_name
+            || plan.plugin_name != inst.plugin_name
+        {
+            return Err(JsValue::from_str(&format!(
+                "instance {} bookkeeping mismatch: plan (channel {:?}, '{}', plugin '{}') \
+                 vs scan (channel {:?}, '{}', plugin '{}')",
+                i + 1,
+                plan.channel,
+                plan.channel_name,
+                plan.plugin_name,
+                inst.channel,
+                inst.channel_name,
+                inst.plugin_name,
+            )));
+        }
+        match source.bundle_for(plan, &inst.chunk.chunk) {
+            Ok(Some(bundle)) => bundles.push(Some(bundle)),
+            Ok(None) => {
+                let reason = source
+                    .warnings
+                    .pop()
+                    .unwrap_or_else(|| "no Serum 2 bundle produced".into());
+                warnings.push(format!(
+                    "instance {} on channel '{}': {reason}",
+                    i + 1,
+                    channel_display(&plan.channel_name)
+                ));
+                bundles.push(None);
+            }
+            Err(e) => {
+                warnings.push(format!(
+                    "instance {} on channel '{}': {e}",
+                    i + 1,
+                    channel_display(&plan.channel_name)
+                ));
+                bundles.push(None);
+            }
+        }
+    }
+
+    let (out, report) =
+        flpconv::apply(data, &plans, &bundles).map_err(|e| JsValue::from_str(&e))?;
+
+    let details: Vec<String> = report
+        .converted
+        .iter()
+        .map(|c| {
+            format!(
+                "{{\"channel\":\"{}\",\"channelName\":\"{}\",\
+                 \"presetName\":\"{}\",\"payloadLen\":{},\"notes\":[]}}",
+                json_escape(&c.channel.map(|v| v.to_string()).unwrap_or_default()),
+                json_escape(&c.channel_name),
+                json_escape(&c.preset_name),
+                c.new_payload_len
+            )
+        })
+        .collect();
+    Ok(ConvertReport {
+        converted_count: report.converted.len() as u32,
+        flp: out,
+        warnings_json: json_string_array(warnings.iter().map(|s| s.as_str())),
+        details_json: format!("[{}]", details.join(",")),
+    })
+}
+
+/// Fallback channel label for report messages (mirrors `flpconv`'s
+/// `display_name`).
+fn channel_display(name: &str) -> &str {
+    if name.is_empty() { "-" } else { name }
 }

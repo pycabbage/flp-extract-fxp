@@ -1,8 +1,13 @@
 //! End-to-end tests: build a synthetic FLP, extract it with the real CLI
 //! binary, and validate the resulting .fxp through the CLI as well.
+//!
+//! The `convert_*` tests exercise the Serum 1 -> Serum 2 FLP converter on
+//! `tests/fixtures/serina1.flp` (a real FL Studio project with 5 Serum 1
+//! instances and 1 genuine Serum 2 instance).
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
+use flp_extract_fxp::{core::scan_serum_instances, flpconv::scan_convertible};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -148,4 +153,97 @@ fn validates_real_fixture() {
         .status()
         .unwrap();
     assert!(status.success(), "fixture failed validation");
+}
+
+fn serina1_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/serina1.flp")
+}
+
+#[test]
+fn convert_writes_output() {
+    let dir = temp_dir("convert");
+    let out = dir.join("conv.flp");
+    let output = Command::new(BIN)
+        .args(["convert", "--out"])
+        .arg(&out)
+        .arg(serina1_fixture())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "convert failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("converting 5 Serum 1 instance(s)"),
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("-> converted (cid3").count(), 5, "{stdout}");
+    assert!(out.exists(), "expected {}", out.display());
+}
+
+#[test]
+fn converted_flp_scans_clean() {
+    let dir = temp_dir("scan");
+    let out = dir.join("conv.flp");
+    let status = Command::new(BIN)
+        .args(["convert", "--out"])
+        .arg(&out)
+        .arg(serina1_fixture())
+        .status()
+        .unwrap();
+    assert!(status.success(), "convert failed");
+    let output = Command::new(BIN).args(["list"]).arg(&out).output().unwrap();
+    assert!(output.status.success(), "list failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // 5 converted + 1 pre-existing Serum 2 instance.
+    assert!(
+        stdout.contains("0 Serum 1 preset(s), 6 Serum 2 instance(s)"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn converted_flp_diff_is_localized() {
+    let dir = temp_dir("diff");
+    let out = dir.join("conv.flp");
+    let status = Command::new(BIN)
+        .args(["convert", "--out"])
+        .arg(&out)
+        .arg(serina1_fixture())
+        .status()
+        .unwrap();
+    assert!(status.success(), "convert failed");
+
+    let orig = std::fs::read(serina1_fixture()).unwrap();
+    let conv = std::fs::read(&out).unwrap();
+    // FLhd prefix unchanged (first 16 bytes).
+    assert_eq!(&conv[..16], &orig[..16]);
+    // FLdt chunk magic at offset 8+hdrlen (=14) unchanged; only the u32
+    // length field after it is legitimately rewritten.
+    assert_eq!(&conv[14..18], &orig[14..18]);
+    // The conversion grew the file (Serum 2 payloads are larger).
+    assert!(conv.len() > orig.len());
+
+    // The converted file holds exactly 6 Serum 2 instances (5 converted +
+    // 1 original) and no Serum 1 instances at all.
+    let (instances, stats) = scan_serum_instances(&conv).unwrap();
+    assert!(
+        instances.is_empty(),
+        "Serum 1 instances left: {}",
+        instances.len()
+    );
+    assert_eq!(stats.serum2_count, 6);
+
+    // Structural alignment: on the original sample the converter's plans and
+    // the core scan's Serum 1 instances must be 1:1 in the same order.
+    let plans = scan_convertible(&orig).unwrap();
+    let (instances, _) = scan_serum_instances(&orig).unwrap();
+    assert_eq!(plans.len(), instances.len());
+    for (p, i) in plans.iter().zip(&instances) {
+        assert_eq!(p.channel, i.channel);
+        assert_eq!(p.channel_name, i.channel_name);
+        assert_eq!(p.plugin_name, i.plugin_name);
+    }
 }

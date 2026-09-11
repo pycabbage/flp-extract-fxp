@@ -24,6 +24,11 @@ export function presetFilename(preset: Preset): string {
   return `${preset.index}-${sanitizeFilename(base)}.fxp`
 }
 
+export function convertedFlpFilename(fileName: string): string {
+  const base = fileName.replace(/\.[^.]+$/, "") || "project"
+  return `${base}-serum2.flp`
+}
+
 export function downloadBlob(bytes: Uint8Array, filename: string): void {
   const url = URL.createObjectURL(new Blob([bytes.slice()], { type: "application/octet-stream" }))
   const anchor = document.createElement("a")

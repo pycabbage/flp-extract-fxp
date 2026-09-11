@@ -1,4 +1,4 @@
-import { AlertCircleIcon, ExternalLinkIcon } from "lucide-react"
+import { AlertCircleIcon, DownloadIcon, ExternalLinkIcon, RefreshCwIcon } from "lucide-react"
 import { useRef, useState } from "react"
 import { toast } from "sonner"
 
@@ -15,11 +15,18 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
+import { Card, CardContent } from "@/components/ui/card"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { UploadCard } from "@/components/upload-card"
-import { buildZip, downloadBlob, formatBytes, presetFilename } from "@/lib/download"
-import { buildFxp, initWasm, scan, type Preset } from "@/lib/wasm"
+import {
+  buildZip,
+  convertedFlpFilename,
+  downloadBlob,
+  formatBytes,
+  presetFilename,
+} from "@/lib/download"
+import { buildFxp, convert, initWasm, scan, type ConvertOutcome, type Preset } from "@/lib/wasm"
 
 import { ThemeProvider } from "./components/theme-provider"
 
@@ -29,6 +36,8 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [fatalError, setFatalError] = useState<string | null>(null)
+  const [converting, setConverting] = useState(false)
+  const [converted, setConverted] = useState<ConvertOutcome | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
 
@@ -41,6 +50,7 @@ export default function App() {
     setError(null)
     setFatalError(null)
     setSelected(new Set())
+    setConverted(null)
     try {
       await initWasm()
       const data = new Uint8Array(await file.arrayBuffer())
@@ -149,6 +159,35 @@ export default function App() {
     }
   }
 
+  const handleConvert = () => {
+    if (!result) return
+    setConverting(true)
+    try {
+      const outcome = convert(result.fileData)
+      setConverted(outcome)
+      const name = convertedFlpFilename(result.fileName)
+      downloadBlob(outcome.flp, name)
+      toast.success(
+        `Converted ${outcome.convertedCount} Serum 1 instance${outcome.convertedCount === 1 ? "" : "s"}`
+      )
+      for (const warning of outcome.warnings) {
+        toast.warning(warning)
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to convert the file."
+      toast.error(message)
+    } finally {
+      setConverting(false)
+    }
+  }
+
+  const downloadConverted = () => {
+    if (!result || !converted) return
+    const name = convertedFlpFilename(result.fileName)
+    downloadBlob(converted.flp, name)
+    toast.success(`Downloaded ${name} (${formatBytes(converted.flp.length)})`)
+  }
+
   return (
     <TooltipProvider>
       <ThemeProvider>
@@ -228,6 +267,32 @@ export default function App() {
               onDownloadSelectedZip={downloadSelectedZip}
               onDownloadZip={downloadZip}
             />
+          )}
+
+          {result && (
+            <Card>
+              <CardContent className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  disabled={converting || rows.length === 0}
+                  onClick={handleConvert}
+                >
+                  <RefreshCwIcon /> Convert to Serum 2
+                </Button>
+                {converted && (
+                  <>
+                    <Button size="sm" variant="secondary" onClick={downloadConverted}>
+                      <DownloadIcon /> Download converted .flp
+                    </Button>
+                    <span className="text-muted-foreground text-sm">
+                      Converted {converted.convertedCount} Serum 1 instance
+                      {converted.convertedCount === 1 ? "" : "s"} to Serum 2 (warnings:{" "}
+                      {converted.warnings.length})
+                    </span>
+                  </>
+                )}
+              </CardContent>
+            </Card>
           )}
 
           <footer className="text-muted-foreground mt-auto pt-4 text-center text-xs">
