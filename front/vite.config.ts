@@ -1,19 +1,15 @@
-import path from "node:path";
-import react, { reactCompilerPreset } from "@vitejs/plugin-react";
-import babel from "@rolldown/plugin-babel";
-import tailwindcss from "@tailwindcss/vite";
-import { defineConfig } from "vite";
+import tailwindcss from "@tailwindcss/vite"
+import react from "@vitejs/plugin-react"
+import { defineConfig } from "vite"
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: "/flp-extract-fxp/",
-  plugins: [react(), babel({ presets: [reactCompilerPreset()] }), tailwindcss()],
+  base: process.env.VITE_BASE,
+  plugins: [react({ compiler: true }), tailwindcss()],
   resolve: {
-    alias: {
-      "@": path.resolve(import.meta.dirname, "./src"),
-    },
+    tsconfigPaths: true,
   },
   optimizeDeps: {
     exclude: ["flp_extract_fxp"],
   },
-});
+})

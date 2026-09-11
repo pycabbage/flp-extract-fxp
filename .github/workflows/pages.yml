@@ -18,7 +18,7 @@ jobs:
   wasm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -26,25 +26,25 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack
       - name: Build wasm (SeaBreeze core)
-        run: wasm-pack build --target web --out-dir front/pkg --out-name flp_extract_fxp .
-      - uses: actions/upload-artifact@v4
+        run: wasm-pack build --target web --out-dir pkg --out-name flp_extract_fxp .
+      - uses: actions/upload-artifact@v7
         with:
           name: wasm-pkg
-          path: front/pkg/
+          path: pkg/
 
   build:
     needs: wasm
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: wasm-pkg
-          path: front/pkg
-      - uses: pnpm/action-setup@v4
+          path: pkg
+      - uses: pnpm/action-setup@v6
         with:
           version: 12
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -53,9 +53,11 @@ jobs:
         run: pnpm install --frozen-lockfile
         working-directory: front
       - name: Build
+        env:
+          VITE_BASE: /flp-extract-fxp/
         run: pnpm build
         working-directory: front
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: front/dist
 
@@ -68,4 +70,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

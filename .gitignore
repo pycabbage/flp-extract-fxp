@@ -31,5 +31,5 @@ target
 /pkg/
 
 
-# Frontend wasm-pack output
-/front/pkg/
+# wasm-pack output
+/pkg/

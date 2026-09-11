@@ -1,4 +1,3 @@
-import { useCallback, useMemo, useRef, useState } from "react";
 import {
   AlertCircleIcon,
   DownloadIcon,
@@ -7,9 +6,11 @@ import {
   PackageOpenIcon,
   TriangleAlertIcon,
   UploadIcon,
-} from "lucide-react";
-import { toast } from "sonner";
+} from "lucide-react"
+import { useCallback, useMemo, useRef, useState } from "react"
+import { toast } from "sonner"
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,12 +19,13 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
+} from "@/components/ui/alert-dialog"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Progress } from "@/components/ui/progress"
+import { Toaster } from "@/components/ui/sonner"
 import {
   Table,
   TableBody,
@@ -31,47 +33,44 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table";
-import { Progress } from "@/components/ui/progress";
-import { Toaster } from "@/components/ui/sonner";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-
-import { buildZip, downloadBlob, formatBytes, presetFilename } from "@/lib/download";
-import { buildFxp, initWasm, scan, type Preset } from "@/lib/wasm";
+} from "@/components/ui/table"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { buildZip, downloadBlob, formatBytes, presetFilename } from "@/lib/download"
+import { buildFxp, initWasm, scan, type Preset } from "@/lib/wasm"
 
 type ScanResult = {
-  fileName: string;
-  fileData: Uint8Array;
-  presets: Preset[];
-  duplicates: number;
-  serum2Skipped: number;
-  failed: string[];
-};
+  fileName: string
+  fileData: Uint8Array
+  presets: Preset[]
+  duplicates: number
+  serum2Skipped: number
+  failed: string[]
+}
 
 export default function App() {
-  const [result, setResult] = useState<ScanResult | null>(null);
-  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [fatalError, setFatalError] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [dragging, setDragging] = useState(false);
+  const [result, setResult] = useState<ScanResult | null>(null)
+  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [fatalError, setFatalError] = useState<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [dragging, setDragging] = useState(false)
 
-  const rows = useMemo(() => result?.presets ?? [], [result]);
-  const allSelected = rows.length > 0 && selected.size === rows.length;
-  const someSelected = selected.size > 0 && selected.size < rows.length;
+  const rows = useMemo(() => result?.presets ?? [], [result])
+  const allSelected = rows.length > 0 && selected.size === rows.length
+  const someSelected = selected.size > 0 && selected.size < rows.length
 
   const handleFile = useCallback(async (file: File) => {
-    setLoading(true);
-    setError(null);
-    setFatalError(null);
-    setSelected(new Set());
+    setLoading(true)
+    setError(null)
+    setFatalError(null)
+    setSelected(new Set())
     try {
-      await initWasm();
-      const data = new Uint8Array(await file.arrayBuffer());
-      const report = scan(data);
-      const unique = report.presets.filter((p) => !p.duplicate);
-      const duplicates = report.presets.length - unique.length;
+      await initWasm()
+      const data = new Uint8Array(await file.arrayBuffer())
+      const report = scan(data)
+      const unique = report.presets.filter((p) => !p.duplicate)
+      const duplicates = report.presets.length - unique.length
       setResult({
         fileName: file.name,
         fileData: data,
@@ -79,125 +78,109 @@ export default function App() {
         duplicates,
         serum2Skipped: report.serum2Skipped,
         failed: report.failed,
-      });
+      })
       if (unique.length === 0 && report.failed.length > 0) {
-        toast.error(`No presets extracted from ${file.name}`);
+        toast.error(`No presets extracted from ${file.name}`)
       } else {
         toast.success(
           `Loaded ${unique.length} preset${unique.length === 1 ? "" : "s"}` +
             (duplicates > 0
               ? ` (${duplicates} duplicate${duplicates === 1 ? "" : "s"} ignored)`
-              : ""),
-        );
+              : "")
+        )
       }
       for (const message of report.failed) {
-        toast.warning(message);
+        toast.warning(message)
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to scan the file.";
-      setError(message);
-      toast.error(message);
+      const message = err instanceof Error ? err.message : "Failed to scan the file."
+      setError(message)
+      toast.error(message)
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
-  }, []);
+  }, [])
 
   const onInputChange = useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      if (file) void handleFile(file);
-      event.target.value = "";
+      const file = event.target.files?.[0]
+      if (file) void handleFile(file)
+      event.target.value = ""
     },
-    [handleFile],
-  );
+    [handleFile]
+  )
 
   const onDrop = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      setDragging(false);
-      const file = event.dataTransfer.files?.[0];
-      if (file) void handleFile(file);
+      event.preventDefault()
+      setDragging(false)
+      const file = event.dataTransfer.files?.[0]
+      if (file) void handleFile(file)
     },
-    [handleFile],
-  );
+    [handleFile]
+  )
 
   const toggleRow = useCallback((index: number, checked: boolean) => {
     setSelected((prev) => {
-      const next = new Set(prev);
-      if (checked) next.add(index);
-      else next.delete(index);
-      return next;
-    });
-  }, []);
+      const next = new Set(prev)
+      if (checked) next.add(index)
+      else next.delete(index)
+      return next
+    })
+  }, [])
 
   const toggleAll = useCallback(() => {
     setSelected((prev) =>
-      prev.size === rows.length ? new Set() : new Set(rows.map((r) => r.index)),
-    );
-  }, [rows]);
+      prev.size === rows.length ? new Set() : new Set(rows.map((r) => r.index))
+    )
+  }, [rows])
 
   const downloadOne = useCallback(
     (preset: Preset) => {
-      if (!result) return;
+      if (!result) return
       try {
-        const bytes = buildFxp(result.fileData, preset.index);
-        const name = presetFilename(preset);
-        downloadBlob(bytes, name);
-        toast.success(`Downloaded ${name} (${formatBytes(bytes.length)})`);
+        const bytes = buildFxp(result.fileData, preset.index)
+        const name = presetFilename(preset)
+        downloadBlob(bytes, name)
+        toast.success(`Downloaded ${name} (${formatBytes(bytes.length)})`)
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to build the .fxp.";
-        toast.error(message);
+        const message = err instanceof Error ? err.message : "Failed to build the .fxp."
+        toast.error(message)
       }
     },
-    [result],
-  );
-
-  const downloadSelectedFxp = useCallback(() => {
-    if (!result) return;
-    const chosen = rows.filter((r) => selected.has(r.index));
-    if (chosen.length !== 1) return;
-    const preset = chosen[0]!;
-    try {
-      const bytes = buildFxp(result.fileData, preset.index);
-      const name = presetFilename(preset);
-      downloadBlob(bytes, name);
-      toast.success(`Downloaded ${name} (${formatBytes(bytes.length)})`);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to build the .fxp.";
-      toast.error(message);
-    }
-  }, [result, rows, selected]);
+    [result]
+  )
 
   const downloadSelectedZip = useCallback(() => {
-    if (!result) return;
-    const chosen = rows.filter((r) => selected.has(r.index));
-    if (chosen.length === 0) return;
+    if (!result) return
+    const chosen = rows.filter((r) => selected.has(r.index))
+    if (chosen.length === 0) return
     try {
-      const zip = buildZip(result.fileData, chosen);
-      const base = result.fileName.replace(/\.[^.]+$/, "") || "presets";
-      const name = `${base}-selected.zip`;
-      downloadBlob(zip, name);
-      toast.success(`Downloaded ${name} (${chosen.length} presets, ${formatBytes(zip.length)})`);
+      const zip = buildZip(result.fileData, chosen)
+      const base = result.fileName.replace(/\.[^.]+$/, "") || "presets"
+      const name = `${base}-selected.zip`
+      downloadBlob(zip, name)
+      toast.success(`Downloaded ${name} (${chosen.length} presets, ${formatBytes(zip.length)})`)
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to build the ZIP.";
-      toast.error(message);
+      const message = err instanceof Error ? err.message : "Failed to build the ZIP."
+      toast.error(message)
     }
-  }, [result, rows, selected]);
+  }, [result, rows, selected])
 
   const downloadZip = useCallback(() => {
-    if (!result) return;
-    if (rows.length === 0) return;
+    if (!result) return
+    if (rows.length === 0) return
     try {
-      const zip = buildZip(result.fileData, rows);
-      const base = result.fileName.replace(/\.[^.]+$/, "") || "presets";
-      const name = `${base}-fxp.zip`;
-      downloadBlob(zip, name);
-      toast.success(`Downloaded ${name} (${rows.length} presets, ${formatBytes(zip.length)})`);
+      const zip = buildZip(result.fileData, rows)
+      const base = result.fileName.replace(/\.[^.]+$/, "") || "presets"
+      const name = `${base}-fxp.zip`
+      downloadBlob(zip, name)
+      toast.success(`Downloaded ${name} (${rows.length} presets, ${formatBytes(zip.length)})`)
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to build the ZIP.";
-      toast.error(message);
+      const message = err instanceof Error ? err.message : "Failed to build the ZIP."
+      toast.error(message)
     }
-  }, [result, rows]);
+  }, [result, rows])
 
   return (
     <TooltipProvider>
@@ -216,8 +199,8 @@ export default function App() {
             </Button>
           </div>
           <p className="text-muted-foreground max-w-2xl text-sm">
-            Extract Serum 1 presets embedded in FL Studio project (.flp) files and download them as
-            Serum 2-loadable .fxp files — entirely in your browser.
+            Extract Serum presets embedded in FL Studio project (.flp) files and download them as
+            Serum2-loadable .fxp files — entirely in your browser.
           </p>
         </header>
 
@@ -248,7 +231,7 @@ export default function App() {
           <AlertDialog
             open
             onOpenChange={(open) => {
-              if (!open) setFatalError(null);
+              if (!open) setFatalError(null)
             }}
           >
             <AlertDialogContent>
@@ -274,7 +257,6 @@ export default function App() {
             onToggleAll={toggleAll}
             onToggleRow={toggleRow}
             onDownloadOne={downloadOne}
-            onDownloadSelectedFxp={downloadSelectedFxp}
             onDownloadSelectedZip={downloadSelectedZip}
             onDownloadZip={downloadZip}
           />
@@ -286,22 +268,22 @@ export default function App() {
       </div>
       <Toaster richColors position="bottom-right" />
     </TooltipProvider>
-  );
+  )
 }
 
 function UploadCard(props: {
-  loading: boolean;
-  dragging: boolean;
-  onDragging: (dragging: boolean) => void;
-  onPick: () => void;
-  onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
+  loading: boolean
+  dragging: boolean
+  onDragging: (dragging: boolean) => void
+  onPick: () => void
+  onDrop: (event: React.DragEvent<HTMLDivElement>) => void
 }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>Load a project file</CardTitle>
         <CardDescription>
-          Drop an .flp file below or pick one from disk. The scan looks for Serum 1 plugin instances
+          Drop an .flp file below or pick one from disk. The scan looks for Serum plugin instances
           and extracts their preset state.
         </CardDescription>
       </CardHeader>
@@ -311,17 +293,17 @@ function UploadCard(props: {
           tabIndex={0}
           aria-label="Upload .flp file"
           onClick={() => {
-            if (!props.loading) props.onPick();
+            if (!props.loading) props.onPick()
           }}
           onKeyDown={(event) => {
             if (!props.loading && (event.key === "Enter" || event.key === " ")) {
-              event.preventDefault();
-              props.onPick();
+              event.preventDefault()
+              props.onPick()
             }
           }}
           onDragOver={(event) => {
-            event.preventDefault();
-            props.onDragging(true);
+            event.preventDefault()
+            props.onDragging(true)
           }}
           onDragLeave={() => props.onDragging(false)}
           onDrop={props.onDrop}
@@ -349,8 +331,8 @@ function UploadCard(props: {
               <Button
                 type="button"
                 onClick={(event) => {
-                  event.stopPropagation();
-                  props.onPick();
+                  event.stopPropagation()
+                  props.onPick()
                 }}
               >
                 <UploadIcon /> Select .flp file
@@ -360,7 +342,7 @@ function UploadCard(props: {
         </div>
       </CardContent>
     </Card>
-  );
+  )
 }
 
 function EmptyState() {
@@ -369,25 +351,24 @@ function EmptyState() {
       <PackageOpenIcon />
       <AlertTitle>Nothing scanned yet</AlertTitle>
       <AlertDescription>
-        Load an .flp file above to see the Serum 1 presets it contains.
+        Load an .flp file above to see the Serum presets it contains.
       </AlertDescription>
     </Alert>
-  );
+  )
 }
 
 function ResultsCard(props: {
-  result: ScanResult;
-  selected: ReadonlySet<number>;
-  allSelected: boolean;
-  someSelected: boolean;
-  onToggleAll: () => void;
-  onToggleRow: (index: number, checked: boolean) => void;
-  onDownloadOne: (preset: Preset) => void;
-  onDownloadSelectedFxp: () => void;
-  onDownloadSelectedZip: () => void;
-  onDownloadZip: () => void;
+  result: ScanResult
+  selected: ReadonlySet<number>
+  allSelected: boolean
+  someSelected: boolean
+  onToggleAll: () => void
+  onToggleRow: (index: number, checked: boolean) => void
+  onDownloadOne: (preset: Preset) => void
+  onDownloadSelectedZip: () => void
+  onDownloadZip: () => void
 }) {
-  const { result } = props;
+  const { result } = props
   return (
     <Card>
       <CardHeader>
@@ -407,7 +388,7 @@ function ResultsCard(props: {
               </Badge>
             )}
             {result.serum2Skipped > 0 && (
-              <Badge variant="outline">{result.serum2Skipped} Serum 2 skipped</Badge>
+              <Badge variant="outline">{result.serum2Skipped} Serum2 skipped</Badge>
             )}
           </div>
         </div>
@@ -431,12 +412,8 @@ function ResultsCard(props: {
         )}
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            disabled={props.selected.size !== 1}
-            onClick={props.onDownloadSelectedFxp}
-          >
-            <DownloadIcon /> Download selected (.fxp)
+          <Button size="sm" disabled={result.presets.length === 0} onClick={props.onDownloadZip}>
+            <DownloadIcon /> Download all (ZIP)
           </Button>
           <Button
             size="sm"
@@ -445,14 +422,6 @@ function ResultsCard(props: {
             onClick={props.onDownloadSelectedZip}
           >
             <DownloadIcon /> Download selected (ZIP)
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={result.presets.length === 0}
-            onClick={props.onDownloadZip}
-          >
-            <DownloadIcon /> Download all (ZIP)
           </Button>
         </div>
 
@@ -531,13 +500,13 @@ function ResultsCard(props: {
         </div>
       </CardContent>
     </Card>
-  );
+  )
 }
 
 function PresetStatus({ preset }: { preset: Preset }) {
-  const issues = [...preset.errors, ...preset.warnings];
+  const issues = [...preset.errors, ...preset.warnings]
   if (issues.length === 0) {
-    return <Badge className="bg-emerald-600 text-white">Valid</Badge>;
+    return <Badge className="bg-emerald-600 text-white">Valid</Badge>
   }
   if (preset.errors.length > 0) {
     return (
@@ -553,7 +522,7 @@ function PresetStatus({ preset }: { preset: Preset }) {
           </ul>
         </TooltipContent>
       </Tooltip>
-    );
+    )
   }
   return (
     <Tooltip>
@@ -570,5 +539,5 @@ function PresetStatus({ preset }: { preset: Preset }) {
         </ul>
       </TooltipContent>
     </Tooltip>
-  );
+  )
 }

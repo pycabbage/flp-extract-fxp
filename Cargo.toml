@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Extract Serum 1 presets (.fxp) embedded in FL Studio project (.flp) files, loadable by Serum 2"
 license = "MIT"
+repository = "https://github.com/pycabbage/flp-extract-fxp/"
 
 # Library + binary in one crate: the `rlib` is consumed by the CLI binary
 # (src/main.rs) and by tests, the `cdylib` is what wasm-pack turns into the
