@@ -8,10 +8,13 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
+const RESERVED_FILENAME_CHARS = /[<>:"/\\|?*]/
+
 export function sanitizeFilename(name: string): string {
-  // Intentionally matches C0 control characters in addition to Windows-reserved chars.
-  // oxlint-disable-next-line no-control-regex
-  const cleaned = name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim()
+  const cleaned = Array.from(name)
+    .map((char) => (RESERVED_FILENAME_CHARS.test(char) || char.charCodeAt(0) <= 0x1f ? "_" : char))
+    .join("")
+    .trim()
   return cleaned.length > 0 ? cleaned.slice(0, 120) : "preset"
 }
 
@@ -35,12 +38,13 @@ export function downloadBlob(bytes: Uint8Array, filename: string): void {
 export function buildZip(fileData: Uint8Array, presets: Preset[]): Uint8Array {
   const entries: Record<string, Uint8Array> = {}
   for (const preset of presets) {
-    let name = presetFilename(preset)
-    if (name in entries) {
-      name = `${preset.index}-${sanitizeFilename(
-        preset.preset_name || preset.plugin_name || "preset"
-      )}-${preset.content_hash.slice(0, 8)}.fxp`
-    }
+    const defaultName = presetFilename(preset)
+    const name =
+      defaultName in entries
+        ? `${preset.index}-${sanitizeFilename(
+            preset.preset_name || preset.plugin_name || "preset"
+          )}-${preset.content_hash.slice(0, 8)}.fxp`
+        : defaultName
     entries[name] = buildFxp(fileData, preset.index)
   }
   return zipSync(entries)

@@ -1,35 +1,12 @@
-import init, { build_fxp, scan_flp_report } from "flp-extract-fxp"
+import { scan_flp_report, type WasmPreset } from "flp-extract-fxp"
 
-export type WasmPreset = {
-  readonly index: number
-  readonly channel: string
-  readonly channel_name: string
-  readonly plugin_name: string
-  readonly preset_name: string
-  readonly author: string
-  readonly category: string
-  readonly version_f32: number
-  readonly state_bytes: number
-  readonly chunk_bytes: number
-  readonly source: string
-  readonly duplicate: boolean
-  readonly content_hash: string
-  readonly has_warnings: boolean
-  readonly valid: boolean
-  readonly warnings_json: string
-  readonly errors_json: string
-}
+export { default as initWasm, build_fxp as buildFxp } from "flp-extract-fxp"
 
-export type Preset = WasmPreset & {
+type PresetFields = Pick<WasmPreset, Exclude<Extract<keyof WasmPreset, string>, "free">>
+
+export type Preset = PresetFields & {
   readonly warnings: string[]
   readonly errors: string[]
-}
-
-let ready: Promise<void> | null = null
-
-export function initWasm(): Promise<void> {
-  ready ??= init().then(() => undefined)
-  return ready
 }
 
 export function scan(data: Uint8Array): {
@@ -38,8 +15,6 @@ export function scan(data: Uint8Array): {
   serum2Skipped: number
 } {
   const report = scan_flp_report(data)
-  // Field getters live on the prototype, so a plain object spread would
-  // produce undefined values - map every field explicitly.
   const presets: Preset[] = report.presets().map((p) => ({
     index: p.index,
     channel: p.channel,
@@ -65,10 +40,6 @@ export function scan(data: Uint8Array): {
   const serum2Skipped = report.serum2_skipped
   report.free()
   return { presets, failed, serum2Skipped }
-}
-
-export function buildFxp(data: Uint8Array, index: number): Uint8Array {
-  return build_fxp(data, index)
 }
 
 function safeJsonArray(json: string): string[] {
