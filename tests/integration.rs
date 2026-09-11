@@ -1,9 +1,10 @@
 //! End-to-end tests: build a synthetic FLP, extract it with the real CLI
 //! binary, and validate the resulting .fxp through the CLI as well.
 //!
-//! The `convert_*` tests exercise the Serum 1 -> Serum 2 FLP converter on
-//! `tests/fixtures/serina1.flp` (a real FL Studio project with 5 Serum 1
-//! instances and 1 genuine Serum 2 instance).
+//! The `convert_*` tests exercise the Serum 1 -> Serum 2 FLP converter on a
+//! real FL Studio project fixture (5 Serum 1 instances and 1 genuine Serum 2
+//! instance). That fixture is not tracked in the repo (third-party project
+//! content; see docs/flp-conversion.md) — the tests skip when it is absent.
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
@@ -147,6 +148,10 @@ fn extract_from_synthetic_flp_then_validate() {
 fn validates_real_fixture() {
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/extracted_serum1.fxp");
+    if !fixture.exists() {
+        eprintln!("skipping: untracked fixture absent (docs/flp-conversion.md)");
+        return;
+    }
     let status = Command::new(BIN)
         .args(["validate"])
         .arg(&fixture)
@@ -159,8 +164,22 @@ fn serina1_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/serina1.flp")
 }
 
+/// The real-project fixture is untracked; skip the test when absent.
+fn have_serina1() -> bool {
+    let f = serina1_fixture();
+    if f.exists() {
+        true
+    } else {
+        eprintln!("skipping: untracked fixture absent (docs/flp-conversion.md)");
+        false
+    }
+}
+
 #[test]
 fn convert_writes_output() {
+    if !have_serina1() {
+        return;
+    }
     let dir = temp_dir("convert");
     let out = dir.join("conv.flp");
     let output = Command::new(BIN)
@@ -185,6 +204,9 @@ fn convert_writes_output() {
 
 #[test]
 fn converted_flp_scans_clean() {
+    if !have_serina1() {
+        return;
+    }
     let dir = temp_dir("scan");
     let out = dir.join("conv.flp");
     let status = Command::new(BIN)
@@ -206,6 +228,9 @@ fn converted_flp_scans_clean() {
 
 #[test]
 fn converted_flp_diff_is_localized() {
+    if !have_serina1() {
+        return;
+    }
     let dir = temp_dir("diff");
     let out = dir.join("conv.flp");
     let status = Command::new(BIN)

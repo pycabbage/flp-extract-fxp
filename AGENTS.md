@@ -12,8 +12,9 @@ Both surfaces share the same core logic in `src/core.rs`, `src/flp.rs`,
 `src/s1state.rs` (Serum 1 state parser), `src/importer.rs` (faithful port of
 Serum2.vst3's `s1state_load`), `src/s2tree.rs` + `src/serum2state.rs`
 (canonical CBOR + XferJson container), `src/flpconv.rs` (FLP event-213
-rewrite), and `src/s2tables.rs` — **GENERATED** by `tools/gen_s2tables.py`
-from `docs/data/*.json`; never hand-edit it, rerun the generator instead.
+rewrite), and `src/s2tables.rs` — **GENERATED** (runtime-dumped descriptor
+tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
+`docs/data/*.json` inputs are untracked — never hand-edit the file).
 `src/web.rs` is `#[cfg]`-gated to wasm targets only, so native
 `cargo build`/`cargo test` never touch it.
 
@@ -79,7 +80,7 @@ not just design notes:
 - `docs/serum2-importer-analysis.md` — Serum 2's import validation rules.
 - `docs/s1-to-s2-mapping.md` + `docs/s2-runtime-tables.md` — the real Serum 1
   → Serum 2 importer (`s1state_load`, RVA 0x4DABC0) and its runtime-dumped
-  conversion tables (`docs/data/*.json`).
+  conversion tables (baked into `src/s2tables.rs`).
 - `docs/flp-serum2-conversion.md` — FLP event-213 byte-level rules for Serum 1
   vs Serum 2 instances (the rewrite recipe).
 - `docs/flp-conversion.md` — the shipped FLP conversion feature (pipeline,
@@ -101,22 +102,26 @@ docs above):
 - Zip-packed FLPs (`PK`-prefixed "loop package" exports) are unsupported by
   design; the FLP must be extracted first.
 - `src/importer.rs` correctness is proven by **byte-identity tests** against
-  `tests/fixtures/golden_s2/*.bin` (golden states produced by the REAL
-  importer, called at runtime). Do not "simplify" importer logic without
-  re-running those tests.
+  golden states produced by the REAL importer (called at runtime). Do not
+  "simplify" importer logic without re-running those tests.
 - Converted processor states use **raw-block zstd frames** (uncompressed) on
   purpose — plugin-accepted; the goldens use libzstd level 3, both are
   standard frames. Smaller frames are future work, not a bug to fix.
 
 ## Tests
 
-- `tests/fixtures/extracted_serum1.fxp` is a real extracted fixture used by
-  `validates_real_fixture`; don't regenerate/edit it casually — it pins
-  real-world validation behavior.
+The real-preset fixtures and golden files are **untracked verification data**
+(third-party preset content; see `docs/flp-conversion.md` → "Untracked
+verification artifacts"). They live on the working machine only; every test
+that needs one skips silently when the file is absent, so a fresh clone (and
+CI) passes `cargo test` without them:
+
+- `tests/fixtures/extracted_serum1.fxp` — real extracted fixture used by
+  `validates_real_fixture`; pins real-world validation behavior.
 - `tests/fixtures/serina1/*.fxp` (5 real Serum 1 presets) and
   `tests/fixtures/serina1.flp` (real project: 5 Serum 1 + 1 Serum 2 instance)
   drive the converter tests.
-- `tests/fixtures/golden_s2/0N_processor_state.bin` are golden converted
+- `tests/fixtures/golden_s2/0N_processor_state.bin` — golden converted
   processor states produced by the REAL importer (called at runtime) and
   accepted by the real plugin — ground truth for `golden_byte_identical_*`;
   don't regenerate/edit them casually.

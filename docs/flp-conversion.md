@@ -56,8 +56,8 @@ FLP file
 | event scan / planning | `src/flp.rs`, `src/serum.rs`, `src/flpconv.rs::scan_convertible_detailed` | `flp-serum2-conversion.md` §1–§5 |
 | S1 state parse | `src/s1state.rs` | `serum-fxp-format.md` |
 | conversion | `src/importer.rs` — faithful port of `s1state_load` | `s1-to-s2-mapping.md`, `s2-runtime-tables.md` |
-| tables | `src/s2tables.rs` — **GENERATED**, do not hand-edit; rerun `python tools/gen_s2tables.py` | runtime dumps in `docs/data/*.json` |
-| CBOR + container | `src/s2tree.rs`, `src/serum2state.rs` | `serum2-state-format.md`, `tools/reference/canonical_cbor_encoder.py` |
+| tables | `src/s2tables.rs` — **GENERATED**, do not hand-edit | `s2-runtime-tables.md` |
+| CBOR + container | `src/s2tree.rs`, `src/serum2state.rs` | `serum2-state-format.md` |
 | FLP rewrite | `src/flpconv.rs::apply` | `flp-serum2-conversion.md` §6 |
 
 Notes:
@@ -66,9 +66,33 @@ Notes:
   conversion wires) and the FX build (`flag = 1`, drops the oscillator WTOsc
   nodes) — the latter was used during RE calibration; FLP conversion itself
   only converts synths.
-- All conversion data tables (`docs/data/fx_desc_table.json`,
-  `misc_tables.json`, `source_enum.json`, `init_body.cbor`) are runtime dumps
-  of Serum2.vst3 2.0.23, not hand-written constants (see `s2-runtime-tables.md`).
+- The conversion data tables baked into `src/s2tables.rs` (343 descriptors,
+  source-enum / aux-remap / defaults tables) and the three embedded binary
+  assets under `docs/data/` (`init_body.cbor`, `serum2_cid4.bin`,
+  `serum2_controller_record.bin` — compile-time `include_bytes!` inputs) are
+  runtime dumps of Serum2.vst3 2.0.23, not hand-written constants (see
+  `s2-runtime-tables.md`). They are functional inputs of the shipped
+  converter and therefore tracked.
+
+## Untracked verification artifacts
+
+Everything that exists only to *verify* the converter is deliberately kept
+out of the repo (third-party preset content and research scaffolding); the
+files remain on the working machine and the tests that need them skip
+silently when absent, so a fresh clone builds and tests green.
+
+| untracked path | content | how to reproduce |
+|---|---|---|
+| `tests/fixtures/serina1/*.fxp` | the 5 Serum 1 presets of the sample project | `flp-extract-fxp extract <sample>.flp --out tests/fixtures/serina1 --overwrite`, then rename to `0N.fxp` |
+| `tests/fixtures/serina1.flp` | the sample FL Studio project (5 Serum 1 + 1 Serum 2) | copy from the local sample library (`assets/`, untracked) |
+| `tests/fixtures/golden_s2/0N_processor_state.bin` | converted processor records produced by the REAL importer | call `s1state_load` at runtime per `docs/s2-runtime-tables.md` (harness method), wrap with `serum2state::build_processor_record`-equivalent container rules |
+| `tests/fixtures/extracted_serum1.fxp` | extraction-feature fixture | `flp-extract-fxp extract` on the sample project, keep preset 01 |
+| `docs/data/*.json` | runtime-dumped descriptor / remap / defaults tables | dump per `docs/s2-runtime-tables.md` (LoadLibraryW + InitDll + memory reads) |
+| `tools/` | table generator (`gen_s2tables.py`), template extractor, canonical CBOR reference encoder | session scaffolding; `src/s2tables.rs` is committed, so nothing in the repo needs them |
+
+Provenance of every dumped constant is documented in
+`docs/s2-runtime-tables.md` (entry layout, RVAs, cross-checks), which is the
+authoritative description if regeneration is ever needed.
 
 ## Surfaces
 
@@ -83,11 +107,11 @@ Notes:
 - **Byte-identity vs the real importer**: golden converted states for the 5
   presets of the sample project were produced by calling the REAL
   `s1state_load` at runtime (ctypes harness: `LoadLibraryW` + `InitDll`, call
-  at `base+0x4DABC0` with derived args) and are committed as
-  `tests/fixtures/golden_s2/0N_processor_state.bin`. Unit tests
+  at `base+0x4DABC0` with derived args). Unit tests
   `golden_byte_identical_01..05` (`src/importer.rs`) require the Rust
-  converter's CBOR bodies to equal them. The zstd frame differs only in
-  compression level (we emit raw-block frames; the goldens used libzstd
+  converter's CBOR bodies to equal them; the fixtures are untracked (see
+  above) and the tests skip when they are absent. The zstd frame differs only
+  in compression level (we emit raw-block frames; the goldens used libzstd
   level 3) — both are standard frames, and both are accepted by the plugin.
 - **Dynamic acceptance**: the 5 converted cid-3 processor states inside a
   converted real FLP (`tests/fixtures/serina1.flp`) were fed via `setState` to

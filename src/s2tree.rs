@@ -1,7 +1,8 @@
 //! Serum 2 state body tree: a deterministic CBOR (RFC 8949 subset) value tree
 //! with encode/decode plus raw zstd frame assembly, matching the canonical
-//! Python reference encoder byte-for-byte (see `tools/reference/` and
-//! `docs/serum2-state-format.md`).
+//! Python reference encoder byte-for-byte (validated against 460+ KB of
+//! plugin-produced bodies; see `docs/serum2-state-format.md` and
+//! `docs/flp-conversion.md`).
 //!
 //! Canonical rules reproduced here:
 //! - map keys emitted in sorted byte-lexicographic order; duplicate keys

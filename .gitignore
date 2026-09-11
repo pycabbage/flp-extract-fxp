@@ -33,3 +33,13 @@ target
 
 # wasm-pack output
 /pkg/
+
+# Real-preset fixtures and plugin-dumped tables: verification data, kept out
+# of the repo on purpose (third-party content). Regeneration is documented in
+# docs/flp-conversion.md. The files below stay on the working machine only.
+/tests/fixtures/extracted_serum1.fxp
+/tests/fixtures/serina1.flp
+/tests/fixtures/serina1/
+/tests/fixtures/golden_s2/
+/docs/data/*.json
+/tools/
