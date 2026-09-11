@@ -1,6 +1,6 @@
-import { convert_flp, scan_flp_report, type WasmPreset } from "flp-extract-fxp"
+import { convert_flp, scan_doc, type FlpDoc, type WasmPreset } from "flp-extract-fxp"
 
-export { default as initWasm, build_fxp as buildFxp } from "flp-extract-fxp"
+export { default as initWasm } from "flp-extract-fxp"
 
 type PresetFields = Pick<WasmPreset, Exclude<Extract<keyof WasmPreset, string>, "free">>
 
@@ -9,13 +9,16 @@ export type Preset = PresetFields & {
   readonly errors: string[]
 }
 
-export function scan(data: Uint8Array): {
-  presets: Preset[]
-  failed: string[]
-  serum2Skipped: number
-} {
-  const report = scan_flp_report(data)
-  const presets: Preset[] = report.presets().map((p) => ({
+export type FlpDocHandle = {
+  readonly presets: Preset[]
+  readonly failedJson: string[]
+  readonly serum2Skipped: number
+  buildFxp: (index: number) => Uint8Array
+  free: () => void
+}
+
+function toPreset(p: WasmPreset): Preset {
+  return {
     index: p.index,
     channel: p.channel,
     channel_name: p.channel_name,
@@ -35,11 +38,23 @@ export function scan(data: Uint8Array): {
     errors_json: p.errors_json,
     warnings: safeJsonArray(p.warnings_json),
     errors: safeJsonArray(p.errors_json),
-  }))
-  const failed = safeJsonArray(report.failed_json)
-  const serum2Skipped = report.serum2_skipped
-  report.free()
-  return { presets, failed, serum2Skipped }
+  }
+}
+
+export function scanDoc(data: Uint8Array): FlpDocHandle {
+  const doc: FlpDoc = scan_doc(data)
+  const presets: Preset[] = doc.presets().map(toPreset)
+  const failedJson = safeJsonArray(doc.failed_json)
+  const serum2Skipped = doc.serum2_skipped
+  return {
+    presets,
+    failedJson,
+    serum2Skipped,
+    buildFxp: (index: number) => doc.build_fxp(index),
+    free: () => {
+      doc.free()
+    },
+  }
 }
 
 function safeJsonArray(json: string): string[] {

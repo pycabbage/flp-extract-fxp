@@ -2,8 +2,6 @@
 //! streams, inflates the 172,736-byte state blob and exposes it through typed,
 //! bounds-checked accessors for the downstream S1 -> S2 converter.
 
-use flate2::read::ZlibDecoder;
-
 /// Decompressed size of a modern (Serum >= ~1.2) preset state blob.
 pub const S1_BLOB_SIZE: usize = 172_736;
 /// State-blob sizes of 2015-era (Serum <= ~1.07) presets, not supported here.
@@ -89,9 +87,6 @@ pub const LFO_OFF_DELAY: usize = 0x2D1C;
 pub const LFO_OFF_RISE: usize = 0x2D20;
 /// Embedded wavetable / noise frames: 2048 float32 LE samples per frame.
 pub const FRAME_BYTES: usize = 8192;
-/// Sanity caps on decompressed sizes.
-pub const MAX_STREAM_DECOMP: usize = 32 * 1024 * 1024;
-pub const MAX_TOTAL_DECOMP: usize = 32 * 1024 * 1024;
 /// Modulation-slot record geometry: slots 1-16 at 0x0000, 17-32 at 0x50E0.
 pub const MOD_SLOT_LEN: usize = 40;
 pub const MOD_SLOT_COUNT: usize = 32;
@@ -99,7 +94,7 @@ pub const MOD_SLOTS_1_16: usize = 0x0000;
 pub const MOD_SLOTS_17_32: usize = 0x50E0;
 
 /// Raw Serum 1 preset data ready for conversion.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct S1Preset {
     /// The full decompressed state blob (172,736 bytes for modern presets).
     pub blob: Vec<u8>,
@@ -116,14 +111,9 @@ pub struct S1Preset {
     pub mod_slots: Vec<S1ModSlot>,
 }
 
-/// Metadata read from the decompressed 172,736-byte preset state.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct PresetMeta {
-    pub preset_name: String,
-    pub author: String,
-    pub category: String,
-    pub version_f32: f32,
-}
+/// Metadata read from the decompressed 172,736-byte preset state
+/// (defined in [`crate::serum`]; the parse paths share one type).
+pub use crate::serum::PresetMeta;
 
 /// One validated modulation-slot record (40 bytes, decoded fields + raw).
 #[derive(Debug, Clone)]
@@ -197,117 +187,15 @@ pub struct S1LfoPointMod {
     pub param: u32,
 }
 
-/// Failure of one zlib stream: either bad stream data (tolerated after the
-/// first stream — a chunk boundary may carry non-stream bytes) or a sanity
-/// cap hit (always fatal).
-enum StreamError {
-    Bad(String),
-    Cap(String),
-}
-
-impl From<StreamError> for String {
-    fn from(e: StreamError) -> String {
-        match e {
-            StreamError::Bad(msg) | StreamError::Cap(msg) => msg,
-        }
-    }
-}
-
-/// Inflate one zlib stream starting at `data[0]`; returns the decompressed
-/// bytes and the number of input bytes consumed.
-fn inflate_stream(data: &[u8]) -> Result<(Vec<u8>, usize), StreamError> {
-    use std::io::Read;
-    if data.is_empty() || data[0] != 0x78 {
-        return Err(StreamError::Bad(
-            "not a zlib stream (expected 0x78 header byte)".into(),
-        ));
-    }
-    let mut dec = ZlibDecoder::new(data);
-    let mut out = Vec::with_capacity(4096);
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        match dec.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                out.extend_from_slice(&buf[..n]);
-                if out.len() > MAX_STREAM_DECOMP {
-                    return Err(StreamError::Cap(format!(
-                        "decompressed stream exceeds sanity limit ({MAX_STREAM_DECOMP} bytes)"
-                    )));
-                }
-            }
-            Err(e) => return Err(StreamError::Bad(format!("zlib error: {e}"))),
-        }
-    }
-    Ok((out, dec.total_in() as usize))
-}
-
-/// Split a Serum 1 chunk into its zlib streams.
-///
-/// Layout: `[zlib stream 0][zlib stream 1]...[u32 LE trailer]`, the trailer
-/// holding the compressed size of stream 0. A minimal zlib stream is 8 bytes,
-/// so a 4-byte tail can only be the trailer. The trailer word is tolerated
-/// missing or stale (chunks recovered through `crate::serum` are repaired
-/// before import).
-fn split_streams(chunk: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    if chunk.len() < 8 {
-        return Err("chunk too small to contain a zlib stream".into());
-    }
-    let mut pos = 0usize;
-    let mut streams = Vec::new();
-    let mut total = 0usize;
-    while chunk.len() - pos > 4 {
-        if chunk[pos] != 0x78 {
-            if pos == 0 {
-                return Err("chunk does not start with a zlib stream".into());
-            }
-            break;
-        }
-        let (out, consumed) = match inflate_stream(&chunk[pos..]) {
-            Ok(v) => v,
-            Err(e) => match e {
-                StreamError::Cap(msg) => return Err(msg),
-                StreamError::Bad(msg) => {
-                    if pos == 0 {
-                        return Err(msg);
-                    }
-                    break;
-                }
-            },
-        };
-        total += out.len();
-        if total > MAX_TOTAL_DECOMP {
-            return Err(format!(
-                "decompressed chunk exceeds sanity limit ({MAX_TOTAL_DECOMP} bytes)"
-            ));
-        }
-        streams.push(out);
-        pos += consumed;
-    }
-    if streams.is_empty() {
-        return Err("chunk contains no zlib streams".into());
-    }
-    Ok(streams)
-}
-
 fn f32_le(bytes: &[u8], off: usize) -> f32 {
     f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())
 }
-
 fn u32_le(bytes: &[u8], off: usize) -> u32 {
     u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())
 }
 
 fn u16_le(bytes: &[u8], off: usize) -> u16 {
     u16::from_le_bytes(bytes[off..off + 2].try_into().unwrap())
-}
-
-fn read_cstr(buf: &[u8], off: usize, len: usize) -> String {
-    let Some(field) = buf.get(off..off + len) else {
-        return String::new();
-    };
-    let nul = field.iter().position(|&b| b == 0).unwrap_or(field.len());
-    String::from_utf8_lossy(&field[..nul]).trim().to_string()
 }
 
 /// Validate one 40-byte modulation-slot record; `slot` must match the marker
@@ -382,7 +270,9 @@ fn parse_mod_slots(blob: &[u8]) -> Vec<S1ModSlot> {
 /// Parse a raw Serum 1 preset chunk (concatenated zlib streams + u32 LE
 /// trailer, i.e. `crate::serum::Serum1Chunk::chunk`) into a typed [`S1Preset`].
 pub fn parse_preset(chunk: &[u8]) -> Result<S1Preset, String> {
-    let streams = split_streams(chunk)?;
+    // The trailer word is tolerated missing or stale (chunks recovered
+    // through `crate::serum` are repaired before import).
+    let (streams, _) = crate::zlibio::split_chunk(chunk)?;
     let blob = streams[0].clone();
     if blob.len() != S1_BLOB_SIZE {
         return Err(format!(
@@ -401,9 +291,9 @@ pub fn parse_preset(chunk: &[u8]) -> Result<S1Preset, String> {
         }
     }
     let meta = PresetMeta {
-        preset_name: read_cstr(&blob, OFF_PRESET_NAME, 32),
-        author: read_cstr(&blob, OFF_AUTHOR, 48),
-        category: read_cstr(&blob, OFF_CATEGORY, 48),
+        preset_name: crate::core::cstr(&blob, OFF_PRESET_NAME, 32, true),
+        author: crate::core::cstr(&blob, OFF_AUTHOR, 48, true),
+        category: crate::core::cstr(&blob, OFF_CATEGORY, 48, true),
         version_f32: blob
             .get(OFF_VERSION_F32..OFF_VERSION_F32 + 4)
             .map_or(0.0, |b| f32::from_le_bytes(b.try_into().unwrap())),
@@ -418,42 +308,10 @@ pub fn parse_preset(chunk: &[u8]) -> Result<S1Preset, String> {
 }
 
 impl S1Preset {
-    fn f32_at(&self, off: usize) -> f32 {
-        self.blob
-            .get(off..off + 4)
-            .map_or(0.0, |b| f32::from_le_bytes(b.try_into().unwrap()))
-    }
-
     fn u32_at(&self, off: usize) -> u32 {
         self.blob
             .get(off..off + 4)
             .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
-    }
-
-    fn bytes8(&self, off: usize) -> [u8; 8] {
-        let mut out = [0u8; 8];
-        if let Some(field) = self.blob.get(off..off + 8) {
-            out.copy_from_slice(field);
-        }
-        out
-    }
-
-    /// Raw stored value of master parameter `i` (0..247) at `blob + 0x3460`;
-    /// 0.0 out of range. No clamping (the importer clamps to [0,1] and maps
-    /// NaN to 0 — that is the converter's job).
-    pub fn master_param(&self, i: usize) -> f32 {
-        if i >= MASTER_PARAM_COUNT {
-            return 0.0;
-        }
-        self.f32_at(OFF_MASTER_PARAMS + 4 * i)
-    }
-
-    /// Raw stored value of parameter `228 + i` (0..70) at `blob + 0x4AE0`.
-    pub fn aux_param(&self, i: usize) -> f32 {
-        if i >= AUX_PARAM_COUNT {
-            return 0.0;
-        }
-        self.f32_at(OFF_AUX_PARAMS + 4 * i)
     }
 
     /// FX rack order (10 x i32 LE at `blob + 0x3BE0`): one rack position
@@ -466,34 +324,6 @@ impl S1Preset {
             }
         }
         order
-    }
-
-    /// OSC A wavetable name (512-byte NUL-terminated field at 0x3C08).
-    pub fn wt_name_a(&self) -> String {
-        read_cstr(&self.blob, OFF_WT_NAME_A, NAME_FIELD_LEN)
-    }
-
-    /// OSC B wavetable name (at 0x3E08).
-    pub fn wt_name_b(&self) -> String {
-        read_cstr(&self.blob, OFF_WT_NAME_B, NAME_FIELD_LEN)
-    }
-
-    /// Noise sample name (at 0x4008).
-    pub fn noise_name(&self) -> String {
-        read_cstr(&self.blob, OFF_NOISE_NAME, NAME_FIELD_LEN)
-    }
-
-    /// Macro `k` (0..4) name, 32-byte NUL-terminated field at `0x4A60 + 32k`.
-    pub fn macro_name(&self, k: usize) -> String {
-        if k >= 4 {
-            return String::new();
-        }
-        read_cstr(&self.blob, OFF_MACRO_NAMES + 32 * k, 32)
-    }
-
-    /// The 8-byte per-preset id at `blob + 0x4A58`, preserved verbatim.
-    pub fn preset_id(&self) -> [u8; 8] {
-        self.bytes8(OFF_PRESET_ID)
     }
 
     /// Per-osc embedded wavetable counters (i32 LE x2 at `0x4968/0x496C`).
@@ -509,44 +339,13 @@ impl S1Preset {
         ]
     }
 
-    /// The interpolate-after-load flag byte at `blob + 0x4970`.
-    pub fn interpolate_after_load(&self) -> bool {
-        self.blob
-            .get(OFF_INTERPOLATE_AFTER_LOAD)
-            .copied()
-            .unwrap_or(0)
-            != 0
-    }
-
-    /// Raw 8-byte value at `blob + 0x5528`, written to the S2
-    /// `storedPhasePos` byte-string by the importer.
-    pub fn stored_phase_pos(&self) -> [u8; 8] {
-        self.bytes8(OFF_STORED_PHASE_POS)
-    }
-
-    /// Raw 8-byte value at `blob + 0x5530` (`loopback64`).
-    pub fn loopback64(&self) -> [u8; 8] {
-        self.bytes8(OFF_LOOPBACK64)
-    }
-
-    /// Raw 8-byte value at `blob + 0x5538` (`boundary64`).
-    pub fn boundary64(&self) -> [u8; 8] {
-        self.bytes8(OFF_BOUNDARY64)
-    }
-
     /// The tuning fields the importer reads (see [`S1Tuning`]); the raw
     /// tuning bytes themselves are carried in the appended data streams.
     pub fn tuning_bytes(&self) -> S1Tuning {
         S1Tuning {
             len: self.u32_at(OFF_TUNING_LEN),
-            name: read_cstr(&self.blob, OFF_TUNING_NAME, TUNING_NAME_MAX),
+            name: crate::core::cstr(&self.blob, OFF_TUNING_NAME, TUNING_NAME_MAX, true),
         }
-    }
-
-    /// Oversampling / tuning lock bits at `blob + 0x4A50` (bit 1 =
-    /// lockOversampling, bit 2 = lockTuning).
-    pub fn lock_bits(&self) -> u8 {
-        self.blob.get(OFF_LOCK_BITS).copied().unwrap_or(0)
     }
 
     /// The `k`-th modern LFO graph block (k < 8): 0x2D28 raw bytes at
@@ -609,147 +408,6 @@ impl S1Preset {
                 }
             })
             .collect()
-    }
-
-    /// The `kind`-th scalars curve block (0 = velo, 1 = note), 0x200 raw
-    /// bytes at `blob + 0x4220 + 0x200*kind`; empty slice out of range.
-    pub fn scalars_curve(&self, kind: usize) -> &[u8] {
-        if kind >= SCALARS_BLOCK_COUNT {
-            return &[];
-        }
-        let base = OFF_SCALARS + SCALARS_BLOCK_LEN * kind;
-        self.blob.get(base..base + SCALARS_BLOCK_LEN).unwrap_or(&[])
-    }
-
-    /// The two MIDI-map byte arrays (see [`S1MidiMap`]).
-    pub fn midi_map(&self) -> S1MidiMap {
-        let mut map = S1MidiMap::default();
-        if let Some(region) = self.blob.get(OFF_MIDI_MAP..OFF_MIDI_MAP + MIDI_MAP_LEN) {
-            map.param_cc.copy_from_slice(region);
-        }
-        if let Some(region) = self
-            .blob
-            .get(OFF_MIDI_MAP_EXTRA..OFF_MIDI_MAP_EXTRA + MIDI_MAP_EXTRA_LEN)
-        {
-            map.extra_cc.copy_from_slice(region);
-        }
-        map
-    }
-
-    /// Raw bytes of the global switches block at `blob + 0x4C48` (up to
-    /// [`SWITCHES_SLICE_LEN`] bytes, clamped to the blob end).
-    pub fn switches(&self) -> &[u8] {
-        let end = (OFF_SWITCHES + SWITCHES_SLICE_LEN).min(self.blob.len());
-        self.blob.get(OFF_SWITCHES..end).unwrap_or(&[])
-    }
-
-    /// Float32 field at `switches + off` (0.0 when outside the documented
-    /// 100-byte block).
-    pub fn switch_f32(&self, off: usize) -> f32 {
-        if off + 4 > SWITCHES_LEN {
-            return 0.0;
-        }
-        self.f32_at(OFF_SWITCHES + off)
-    }
-
-    /// A4 tuning reference: Hz = 430 + 20*value (0.5 = 440 Hz).
-    pub fn switch_a4(&self) -> f32 {
-        self.switch_f32(0x00)
-    }
-
-    /// Unison tuning A: index/4 of Linear/Super/Exp/Inv/Random.
-    pub fn switch_unison_tuning_a(&self) -> f32 {
-        self.switch_f32(0x08)
-    }
-
-    /// Unison tuning B, same encoding.
-    pub fn switch_unison_tuning_b(&self) -> f32 {
-        self.switch_f32(0x0C)
-    }
-
-    /// Mono toggle (0/1).
-    pub fn switch_mono(&self) -> f32 {
-        self.switch_f32(0x10)
-    }
-
-    /// Legato toggle (0/1).
-    pub fn switch_legato(&self) -> f32 {
-        self.switch_f32(0x14)
-    }
-
-    /// Portamento "Always" toggle (0/1).
-    pub fn switch_porta_always(&self) -> f32 {
-        self.switch_f32(0x18)
-    }
-
-    /// Portamento "Scaled" toggle (0/1).
-    pub fn switch_porta_scaled(&self) -> f32 {
-        self.switch_f32(0x1C)
-    }
-
-    /// Oversampling: index/2 of 1x/2x/4x (0.5 = 2x).
-    pub fn switch_oversampling(&self) -> f32 {
-        self.switch_f32(0x20)
-    }
-
-    /// Noise one-shot toggle (0/1).
-    pub fn switch_noise_one_shot(&self) -> f32 {
-        self.switch_f32(0x24)
-    }
-
-    /// Noise pitch-track toggle (0/1).
-    pub fn switch_noise_pitch_track(&self) -> f32 {
-        self.switch_f32(0x28)
-    }
-
-    /// Polyphony: (voices - 1) / 31 (default 8 voices = 7/31).
-    pub fn switch_polyphony(&self) -> f32 {
-        self.switch_f32(0x2C)
-    }
-
-    /// Filter keytrack toggle (0/1).
-    pub fn switch_filter_keytrack(&self) -> f32 {
-        self.switch_f32(0x34)
-    }
-
-    /// Unison range A: semitones / 48 (default 2 st = 0.041667).
-    pub fn switch_unison_range_a(&self) -> f32 {
-        self.switch_f32(0x38)
-    }
-
-    /// Unison range B, same encoding.
-    pub fn switch_unison_range_b(&self) -> f32 {
-        self.switch_f32(0x3C)
-    }
-
-    /// Chaos 1 mono toggle (0/1).
-    pub fn switch_chaos1_mono(&self) -> f32 {
-        self.switch_f32(0x40)
-    }
-
-    /// Chaos 2 mono toggle (0/1).
-    pub fn switch_chaos2_mono(&self) -> f32 {
-        self.switch_f32(0x44)
-    }
-
-    /// Chorus mono toggle (0/1).
-    pub fn switch_chorus_mono(&self) -> f32 {
-        self.switch_f32(0x48)
-    }
-
-    /// Chaos 1 sample-and-hold toggle (0/1).
-    pub fn switch_chaos1_sample_hold(&self) -> f32 {
-        self.switch_f32(0x50)
-    }
-
-    /// Chaos 2 sample-and-hold toggle (0/1).
-    pub fn switch_chaos2_sample_hold(&self) -> f32 {
-        self.switch_f32(0x54)
-    }
-
-    /// Reverb Hall/Plate: 1 = Hall (default; mirrored by the 0x3B04 byte).
-    pub fn switch_reverb_hall(&self) -> f32 {
-        self.switch_f32(0x5C)
     }
 }
 
@@ -819,15 +477,7 @@ pub fn lfo_y_vals(block: &[u8]) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn zlib_stream(data: &[u8]) -> Vec<u8> {
-        use flate2::Compression;
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
-        let mut e = ZlibEncoder::new(Vec::new(), Compression::new(1));
-        e.write_all(data).unwrap();
-        e.finish().unwrap()
-    }
+    use crate::testutil::zlib_stream;
 
     fn put_f32(blob: &mut [u8], off: usize, v: f32) {
         blob[off..off + 4].copy_from_slice(&v.to_le_bytes());
@@ -954,58 +604,64 @@ mod tests {
         assert_eq!(p.meta.author, "Jane");
         assert_eq!(p.meta.category, "");
         assert!((p.meta.version_f32 - 0.1631).abs() < 1e-6);
-        assert!((p.master_param(0) - 0.7).abs() < 1e-6);
-        assert!((p.master_param(61) - 0.25).abs() < 1e-6);
-        assert_eq!(p.master_param(MASTER_PARAM_COUNT), 0.0);
-        assert!((p.aux_param(0) - 0.25).abs() < 1e-6);
-        assert_eq!(p.aux_param(AUX_PARAM_COUNT), 0.0);
+        assert!((f32_le(&p.blob, OFF_MASTER_PARAMS) - 0.7).abs() < 1e-6);
+        assert!((f32_le(&p.blob, OFF_MASTER_PARAMS + 4 * 61) - 0.25).abs() < 1e-6);
+        assert!((f32_le(&p.blob, OFF_AUX_PARAMS) - 0.25).abs() < 1e-6);
         assert_eq!(p.fx_order(), [5, 0, 1, 2, 3, 6, 7, 8, 9, 4]);
-        assert_eq!(p.wt_name_a(), r"Tables\My Saw.wav");
-        assert_eq!(p.noise_name(), "Noise/AC hum1.wav");
-        assert_eq!(p.macro_name(0), "Macro A");
-        assert_eq!(p.macro_name(3), "Macro D");
-        assert_eq!(p.macro_name(4), "");
+        assert_eq!(
+            crate::core::cstr(&p.blob, OFF_WT_NAME_A, NAME_FIELD_LEN, true),
+            r"Tables\My Saw.wav"
+        );
+        assert_eq!(
+            crate::core::cstr(&p.blob, OFF_NOISE_NAME, NAME_FIELD_LEN, true),
+            "Noise/AC hum1.wav"
+        );
+        assert_eq!(
+            crate::core::cstr(&p.blob, OFF_MACRO_NAMES, 32, true),
+            "Macro A"
+        );
+        assert_eq!(
+            crate::core::cstr(&p.blob, OFF_MACRO_NAMES + 32 * 3, 32, true),
+            "Macro D"
+        );
         assert_eq!(p.osc_wt_frames(), [8192, 16384]);
-        assert!(p.interpolate_after_load());
-        assert_eq!(p.lock_bits(), 0b0110);
-        assert_eq!(p.preset_id(), [0u8; 8]);
-        assert_eq!(p.stored_phase_pos()[..4], 0x1122_3344u32.to_le_bytes());
-        assert_eq!(p.stored_phase_pos()[4..], 0x5566_7788u32.to_le_bytes());
-        assert_eq!(p.loopback64()[..4], 0xAABB_CCDDu32.to_le_bytes());
-        assert_eq!(p.boundary64()[..4], 0xEEFF_0011u32.to_le_bytes());
+        assert_eq!(p.blob[OFF_INTERPOLATE_AFTER_LOAD], 1);
+        assert_eq!(p.blob[OFF_LOCK_BITS], 0b0110);
+        assert_eq!(&p.blob[OFF_PRESET_ID..OFF_PRESET_ID + 8], &[0u8; 8]);
+        assert_eq!(
+            &p.blob[OFF_STORED_PHASE_POS..OFF_STORED_PHASE_POS + 4],
+            &0x1122_3344u32.to_le_bytes()
+        );
+        assert_eq!(
+            &p.blob[OFF_STORED_PHASE_POS + 4..OFF_STORED_PHASE_POS + 8],
+            &0x5566_7788u32.to_le_bytes()
+        );
+        assert_eq!(
+            &p.blob[OFF_LOOPBACK64..OFF_LOOPBACK64 + 4],
+            &0xAABB_CCDDu32.to_le_bytes()
+        );
+        assert_eq!(
+            &p.blob[OFF_BOUNDARY64..OFF_BOUNDARY64 + 4],
+            &0xEEFF_0011u32.to_le_bytes()
+        );
         assert_eq!(p.tuning_bytes(), S1Tuning::default());
-    }
-
-    #[test]
-    fn switches_helpers() {
-        let p = parse_preset(&synth_chunk()).unwrap();
-        assert!(p.switches().len() >= SWITCHES_SLICE_LEN);
-        assert!((p.switch_a4() - 1.0).abs() < 1e-6);
-        assert!((p.switch_polyphony() - 7.0 / 31.0).abs() < 1e-6);
-        assert!((p.switch_mono() - 1.0).abs() < 1e-6);
-        assert!((p.switch_legato() - 1.0).abs() < 1e-6);
-        assert!((p.switch_reverb_hall() - 1.0).abs() < 1e-6);
-        assert!((p.switch_oversampling() - 0.5).abs() < 1e-6);
-        assert_eq!(p.switch_f32(0x04), 0.0);
-        assert_eq!(p.switch_f32(SWITCHES_LEN), 0.0);
     }
 
     #[test]
     fn scalars_and_midi_map() {
         let p = parse_preset(&synth_chunk()).unwrap();
-        let velo = p.scalars_curve(0);
-        assert_eq!(velo.len(), SCALARS_BLOCK_LEN);
-        assert!((f32::from_le_bytes(velo[..4].try_into().unwrap()) - 0.25).abs() < 1e-6);
-        assert_eq!(p.scalars_curve(1).len(), SCALARS_BLOCK_LEN);
-        assert!(p.scalars_curve(2).is_empty());
-        assert_eq!(p.midi_map(), S1MidiMap::default());
+        let velo = &p.blob[OFF_SCALARS..OFF_SCALARS + SCALARS_BLOCK_LEN];
+        assert!((f32_le(velo, 0) - 0.25).abs() < 1e-6);
+        let note = &p.blob[OFF_SCALARS + SCALARS_BLOCK_LEN..OFF_SCALARS + 2 * SCALARS_BLOCK_LEN];
+        assert!((f32_le(note, 0) - 0.5).abs() < 1e-6);
+        assert_eq!(p.blob[OFF_MIDI_MAP + 7], 0);
+        assert_eq!(p.blob[OFF_MIDI_MAP_EXTRA + 3], 0);
         let mut state = synth_state();
         state[OFF_MIDI_MAP + 7] = 0x40;
         state[OFF_MIDI_MAP_EXTRA + 3] = 0x20;
         let q = parse_preset(&chunk_from(&state, &[vec![0u8; FRAME_BYTES]])).unwrap();
-        let map = q.midi_map();
-        assert_eq!(map.param_cc[7], 0x40);
-        assert_eq!(map.extra_cc[3], 0x20);
+        assert_eq!(q.blob[OFF_MIDI_MAP + 7], 0x40);
+        assert_eq!(q.blob[OFF_MIDI_MAP_EXTRA + 3], 0x20);
     }
 
     #[test]
@@ -1186,8 +842,8 @@ mod tests {
 
     #[test]
     fn rejects_oversized_decompress() {
-        let big = vec![0u8; MAX_STREAM_DECOMP + 1024];
-        let chunk = chunk_from(&synth_state(), &[big]);
+        let big = vec![0u8; crate::zlibio::MAX_STREAM + 1024];
+        let chunk = chunk_from(&big, &[]);
         let err = parse_preset(&chunk).unwrap_err();
         assert!(err.contains("sanity limit"), "{err}");
     }
@@ -1272,29 +928,38 @@ mod tests {
             assert_eq!(slot.bipolar_src, 0);
         }
         assert_eq!(yuki.fx_order(), [5, 0, 1, 2, 3, 7, 9, 4, 6, 8]);
-        assert!((yuki.switch_a4() - 1.0).abs() < 1e-6);
-        assert!((yuki.switch_polyphony() - 7.0 / 31.0).abs() < 1e-6);
+        assert!((f32_le(&yuki.blob, OFF_SWITCHES) - 1.0).abs() < 1e-6);
+        assert!((f32_le(&yuki.blob, OFF_SWITCHES + 0x2C) - 7.0 / 31.0).abs() < 1e-6);
         let lfo1 = yuki.lfo_block(0).unwrap();
         assert_eq!(lfo_flags(lfo1), [1, 0, 0, 0, 1, 1, 0]);
         assert_eq!(lfo_num_points(lfo1), 4);
-        assert!((lfo_rate(lfo1) - yuki.master_param(61)).abs() < 1e-6);
+        assert!((lfo_rate(lfo1) - f32_le(&yuki.blob, OFF_MASTER_PARAMS + 4 * 61)).abs() < 1e-6);
         assert!((lfo_rate(lfo1) - 0.59211).abs() < 1e-4);
         assert!((lfo_smooth(lfo1) - 0.0).abs() < 1e-6);
         assert!((lfo_delay(lfo1) - 0.0).abs() < 1e-6);
         assert!((lfo_rise(lfo1) - 0.0).abs() < 1e-6);
         let lfo2 = yuki.lfo_block(1).unwrap();
-        assert!((lfo_rate(lfo2) - yuki.master_param(62)).abs() < 1e-6);
+        assert!((lfo_rate(lfo2) - f32_le(&yuki.blob, OFF_MASTER_PARAMS + 4 * 62)).abs() < 1e-6);
         assert!((lfo_rate(lfo2) - 0.5).abs() < 1e-6);
         assert_eq!(lfo_num_points(lfo2), 2);
-        assert_eq!(yuki.wt_name_a(), r"\Analog\DS Saw and Tri.wav");
-        assert_eq!(yuki.wt_name_b(), r"\Adventure Kid\raw.wav");
-        assert_eq!(yuki.noise_name(), "/Analog/SID noise.wav");
+        assert_eq!(
+            crate::core::cstr(&yuki.blob, OFF_WT_NAME_A, NAME_FIELD_LEN, true),
+            r"\Analog\DS Saw and Tri.wav"
+        );
+        assert_eq!(
+            crate::core::cstr(&yuki.blob, OFF_WT_NAME_B, NAME_FIELD_LEN, true),
+            r"\Adventure Kid\raw.wav"
+        );
+        assert_eq!(
+            crate::core::cstr(&yuki.blob, OFF_NOISE_NAME, NAME_FIELD_LEN, true),
+            "/Analog/SID noise.wav"
+        );
         let reese = parsed
             .iter()
             .find(|p| p.meta.preset_name == "- Init -reese")
             .unwrap();
         assert_eq!(reese.fx_order(), [2, 3, 4, 5, 6, 0, 7, 8, 9, 1]);
-        assert!((reese.switch_mono() - 1.0).abs() < 1e-6);
-        assert!((reese.switch_legato() - 1.0).abs() < 1e-6);
+        assert!((f32_le(&reese.blob, OFF_SWITCHES + 0x10) - 1.0).abs() < 1e-6);
+        assert!((f32_le(&reese.blob, OFF_SWITCHES + 0x14) - 1.0).abs() < 1e-6);
     }
 }

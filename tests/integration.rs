@@ -8,7 +8,7 @@
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use flp_extract_fxp::{core::scan_serum_instances, flpconv::scan_convertible};
+use flp_extract_fxp::{core::scan_serum_instances, flpconv::scan_convertible_detailed};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -263,7 +263,7 @@ fn converted_flp_diff_is_localized() {
 
     // Structural alignment: on the original sample the converter's plans and
     // the core scan's Serum 1 instances must be 1:1 in the same order.
-    let plans = scan_convertible(&orig).unwrap();
+    let plans = scan_convertible_detailed(&orig).unwrap().0;
     let (instances, _) = scan_serum_instances(&orig).unwrap();
     assert_eq!(plans.len(), instances.len());
     for (p, i) in plans.iter().zip(&instances) {

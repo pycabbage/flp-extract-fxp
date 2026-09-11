@@ -292,6 +292,8 @@ fn run_convert(inputs: &[PathBuf], out: Option<&PathBuf>, dry_run: bool) -> Resu
     let mut total_converted = 0usize;
     for input in inputs {
         let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+        // Single walk: the plans already carry each instance's parsed Serum 1
+        // preset (plan.s1) and preset name; nothing re-scans the buffer.
         let (plans, scan_warnings) = flpconv::scan_convertible_detailed(&buf)?;
         if plans.is_empty() {
             for w in &scan_warnings {
@@ -303,46 +305,14 @@ fn run_convert(inputs: &[PathBuf], out: Option<&PathBuf>, dry_run: bool) -> Resu
             );
             continue;
         }
-        // Serum 1 chunks in the same order as the plans (reuse the core
-        // scan). The core scan also reports Serum FX instances, which the
-        // planner deliberately leaves untouched — drop them before the
-        // strict order check so the two lists can only diverge on real
-        // bookkeeping bugs (mismatch aborts below).
-        let (instances, stats) = scan_serum_instances(&buf)?;
-        let instances: Vec<_> = instances
-            .into_iter()
-            .filter(|i| !i.plugin_name.eq_ignore_ascii_case("serum fx"))
-            .collect();
-        if instances.len() != plans.len() {
-            return Err(format!(
-                "instance bookkeeping mismatch: {} convertible plans vs {} scanned Serum 1 chunks",
-                plans.len(),
-                instances.len()
-            ));
-        }
         println!(
             "{}: converting {} Serum 1 instance(s)",
             input.display(),
             plans.len()
         );
         let mut bundles: Vec<Option<flpconv::Serum2Bundle>> = Vec::with_capacity(plans.len());
-        for (i, (plan, inst)) in plans.iter().zip(&instances).enumerate() {
-            if plan.channel != inst.channel
-                || plan.channel_name != inst.channel_name
-                || plan.plugin_name != inst.plugin_name
-            {
-                return Err(format!(
-                    "instance {} bookkeeping mismatch: plan (channel {:?}, '{}', plugin '{}') vs scan (channel {:?}, '{}', plugin '{}')",
-                    i + 1,
-                    plan.channel,
-                    plan.channel_name,
-                    plan.plugin_name,
-                    inst.channel,
-                    inst.channel_name,
-                    inst.plugin_name,
-                ));
-            }
-            match source.bundle_for(plan, &inst.chunk.chunk) {
+        for (i, plan) in plans.iter().enumerate() {
+            match source.bundle_for(plan, &[]) {
                 Ok(Some(bundle)) => bundles.push(Some(bundle)),
                 Ok(None) => {
                     let reason = source
@@ -373,7 +343,12 @@ fn run_convert(inputs: &[PathBuf], out: Option<&PathBuf>, dry_run: bool) -> Resu
             }
         }
         let (out_buf, report) = flpconv::apply(&buf, &plans, &bundles)?;
-        for (k, (c, inst)) in report.converted.iter().zip(&instances).enumerate() {
+        for (k, c) in report.converted.iter().enumerate() {
+            let state_bytes = plans[k]
+                .s1
+                .as_ref()
+                .map(|p| p.blob.len())
+                .unwrap_or_default();
             println!(
                 "  [{:02}] channel '{}' preset '{}' (state {}) -> converted (cid3 {} B)",
                 k + 1,
@@ -387,16 +362,13 @@ fn run_convert(inputs: &[PathBuf], out: Option<&PathBuf>, dry_run: bool) -> Resu
                 } else {
                     &c.preset_name
                 },
-                format_bytes(inst.chunk.stream_sizes.first().copied().unwrap_or(0)),
+                format_bytes(state_bytes),
                 c.new_payload_len,
             );
         }
         total_converted += report.converted.len();
         for w in &scan_warnings {
             eprintln!("warning: {w}");
-        }
-        for msg in &stats.failed {
-            eprintln!("warning: {msg}");
         }
         for w in &report.warnings {
             eprintln!("warning: {w}");

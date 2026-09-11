@@ -6,25 +6,43 @@
 //! bindings for browsers (`src/web.rs`).
 //!
 //! Module map:
-//! - [`flp`]: minimal FLP event-stream parser.
+//! - [`flp`]: minimal FLP event-stream parser (`parse_events`,
+//!   `parse_event_spans`, `[u32 cid][u64 size][data]` record walking).
 //! - [`serum`]: Serum 1 / Serum 2 detection and preset-chunk recovery.
 //! - [`fxp`]: `.fxp` assembly and Serum 2 import-rule validation.
 //! - [`core`]: reusable "scan an FLP for Serum 1 instances" logic plus
 //!   small text / filename / hashing helpers shared by the CLI and wasm.
+//! - [`zlibio`]: shared zlib inflate + Serum chunk stream splitting.
+//! - [`flpconv`]: FLP byte surgery rewriting Serum 1 event-213 payloads
+//!   into Serum 2 ones (plan / bundle / apply pipeline).
+//! - [`importer`]: Serum 1 → Serum 2 conversion (a faithful port of
+//!   Serum2.vst3's `s1state_load`; split into `params`, `modmatrix`,
+//!   `fxrack`, `lfo`, `meta` submodules).
+//! - [`s1state`]: Serum 1 preset-state parsing (typed view of the
+//!   172,736-byte state blob).
+//! - [`s2tables`]: GENERATED runtime-dumped Serum 2 descriptor tables
+//!   (never hand-edit; provenance in docs/s2-runtime-tables.md).
+//! - [`s2tree`]: deterministic CBOR value tree + raw zstd frames.
+//! - [`serum2state`]: Serum 2 `XferJson` container assembly and parsing.
 //! - `web`: `wasm-bindgen` bindings; only compiled when targeting
 //!   `wasm32-unknown-unknown` (cfg-gated, so native builds never link it).
+//! - `testutil`: `#[cfg(test)]` helpers shared by crate-internal tests.
 
 pub mod core;
 pub mod flp;
 pub mod flpconv;
 pub mod fxp;
 pub mod serum;
+pub mod zlibio;
 
 pub mod importer;
 pub mod s1state;
 pub mod s2tables;
 pub mod s2tree;
 pub mod serum2state;
+
+#[cfg(test)]
+pub(crate) mod testutil;
 
 #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
 pub mod web;

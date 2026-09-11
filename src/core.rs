@@ -45,7 +45,7 @@ pub struct Instance {
 /// is a fatal `Err(String)` with a human-readable message; per-instance
 /// conversion failures are only recorded in [`ScanStats::failed`].
 pub fn scan_serum_instances(buf: &[u8]) -> Result<(Vec<Instance>, ScanStats), String> {
-    let events = flp::parse_events(buf).map_err(|e| e.to_string())?;
+    let events = flp::parse_events(buf)?;
     let mut channels: HashMap<u16, String> = HashMap::new();
     let mut cur_channel: Option<u16> = None;
     let mut cur_fx_name = String::new();
@@ -104,6 +104,26 @@ pub fn scan_serum_instances(buf: &[u8]) -> Result<(Vec<Instance>, ScanStats), St
         }
     }
     Ok((instances, stats))
+}
+
+/// Fallback channel label for report messages (`-` when empty).
+pub(crate) fn display_name(name: &str) -> &str {
+    if name.is_empty() { "-" } else { name }
+}
+
+/// Read a NUL-terminated fixed-width string field at `buf[off..off+len]`.
+/// Out-of-range fields read as empty; `trim` strips surrounding whitespace.
+pub(crate) fn cstr(buf: &[u8], off: usize, len: usize, trim: bool) -> String {
+    let Some(field) = buf.get(off..off + len) else {
+        return String::new();
+    };
+    let nul = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+    let s = String::from_utf8_lossy(&field[..nul]);
+    if trim {
+        s.trim().to_string()
+    } else {
+        s.into_owned()
+    }
 }
 
 /// Decode an FL Studio text event: UTF-16LE when the bytes look like it

@@ -1,6 +1,6 @@
 import { zipSync } from "fflate"
 
-import { buildFxp, type Preset } from "./wasm"
+import { type Preset } from "./wasm"
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -40,7 +40,7 @@ export function downloadBlob(bytes: Uint8Array, filename: string): void {
   URL.revokeObjectURL(url)
 }
 
-export function buildZip(fileData: Uint8Array, presets: Preset[]): Uint8Array {
+export function buildZip(buildFxp: (index: number) => Uint8Array, presets: Preset[]): Uint8Array {
   const entries: Record<string, Uint8Array> = {}
   for (const preset of presets) {
     const defaultName = presetFilename(preset)
@@ -50,7 +50,7 @@ export function buildZip(fileData: Uint8Array, presets: Preset[]): Uint8Array {
             preset.preset_name || preset.plugin_name || "preset"
           )}-${preset.content_hash.slice(0, 8)}.fxp`
         : defaultName
-    entries[name] = buildFxp(fileData, preset.index)
+    entries[name] = buildFxp(preset.index)
   }
   return zipSync(entries)
 }

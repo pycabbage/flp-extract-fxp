@@ -107,17 +107,6 @@ impl Val {
         &mut m[idx].1
     }
 
-    /// Remove the first entry under `key` (map only).
-    pub fn remove(&mut self, key: &str) -> Option<Val> {
-        match self {
-            Val::Map(m) => {
-                let pos = m.iter().position(|(k, _)| k == key)?;
-                Some(m.remove(pos).1)
-            }
-            _ => None,
-        }
-    }
-
     /// Append to an array; silently ignored on non-array values (panic-safe).
     pub fn push(&mut self, v: Val) {
         if let Val::Array(a) = self {
@@ -161,12 +150,6 @@ impl Val {
             Val::Map(m) => Some(m),
             _ => None,
         }
-    }
-
-    /// True when `map[key] == Text("default")` — the Serum 2 "nothing
-    /// customized" marker.
-    pub fn is_default(&self, key: &str) -> bool {
-        matches!(self.get(key), Some(Val::Text(s)) if s == "default")
     }
 }
 
@@ -511,16 +494,7 @@ pub fn zstd_frame_body_len(frame: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
-
-    fn zstd_decompress(frame: &[u8]) -> Result<Vec<u8>, String> {
-        let mut dec = ruzstd::decoding::StreamingDecoder::new(std::io::Cursor::new(frame))
-            .map_err(|e| format!("zstd init: {e}"))?;
-        let mut out = Vec::new();
-        dec.read_to_end(&mut out)
-            .map_err(|e| format!("zstd read: {e}"))?;
-        Ok(out)
-    }
+    use crate::testutil::decode_zstd_frame;
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -642,20 +616,20 @@ mod tests {
             zstd_frame_body_len(&frame),
             Some(crate::s2tables::INIT_BODY.len())
         );
-        assert_eq!(zstd_decompress(&frame).unwrap(), crate::s2tables::INIT_BODY);
+        assert_eq!(decode_zstd_frame(&frame), crate::s2tables::INIT_BODY);
 
         // Synthetic 300,000-byte body -> exactly 3 raw blocks.
         let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         let frame = zstd_raw_frame(&big);
-        assert_eq!(zstd_decompress(&frame).unwrap(), big);
+        assert_eq!(decode_zstd_frame(&frame), big);
         assert_eq!(zstd_frame_body_len(&frame), Some(300_000));
 
         // 0-byte and 1-byte inputs.
         let frame = zstd_raw_frame(&[]);
-        assert_eq!(zstd_decompress(&frame).unwrap(), Vec::<u8>::new());
+        assert_eq!(decode_zstd_frame(&frame), Vec::<u8>::new());
         assert_eq!(zstd_frame_body_len(&frame), Some(0));
         let frame = zstd_raw_frame(b"x");
-        assert_eq!(zstd_decompress(&frame).unwrap(), b"x".to_vec());
+        assert_eq!(decode_zstd_frame(&frame), b"x".to_vec());
         assert_eq!(zstd_frame_body_len(&frame), Some(1));
     }
 

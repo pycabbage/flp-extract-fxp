@@ -18,7 +18,7 @@ use crate::s2tree::{self, Val};
 
 const MAGIC: &[u8; 9] = b"XferJson\0";
 
-fn md5_hex(data: &[u8]) -> String {
+pub(crate) fn md5_hex(data: &[u8]) -> String {
     let mut h = Md5::new();
     h.update(data);
     let digest = h.finalize();
@@ -30,7 +30,7 @@ fn md5_hex(data: &[u8]) -> String {
 }
 
 /// Minimal JSON string escaping (quotes, backslash, control chars).
-fn json_escape(s: &str) -> String {
+pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -154,16 +154,7 @@ pub fn parse_xfer_json(record: &[u8]) -> Result<(String, u32, u32, usize), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
-
-    fn zstd_decompress(frame: &[u8]) -> Result<Vec<u8>, String> {
-        let mut dec = ruzstd::decoding::StreamingDecoder::new(std::io::Cursor::new(frame))
-            .map_err(|e| format!("zstd init: {e}"))?;
-        let mut out = Vec::new();
-        dec.read_to_end(&mut out)
-            .map_err(|e| format!("zstd read: {e}"))?;
-        Ok(out)
-    }
+    use crate::testutil::decode_zstd_frame;
 
     #[test]
     fn processor_header_exact_text() {
@@ -247,7 +238,7 @@ mod tests {
         assert!(json.contains(&format!("\"hash\":\"{}\"", md5_hex(frame))));
 
         // Frame decompresses (ruzstd) back to the canonical CBOR body.
-        let body_bytes = zstd_decompress(frame).expect("decompress");
+        let body_bytes = decode_zstd_frame(frame);
         assert_eq!(body_bytes, s2tree::encode_cbor(&body));
         assert_eq!(body_bytes.len(), uncomp as usize);
 
@@ -279,7 +270,7 @@ mod tests {
         assert_eq!(uncomp, payload.len() as u32);
         assert_eq!(format, 2);
         assert_eq!(&rec[foff..], &frame[..]);
-        assert_eq!(zstd_decompress(&rec[foff..]).unwrap(), payload);
+        assert_eq!(decode_zstd_frame(&rec[foff..]), payload);
     }
 
     #[test]

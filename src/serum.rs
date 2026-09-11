@@ -1,8 +1,6 @@
 //! Serum plugin state handling: detecting Serum 1 instances and recovering
 //! the Serum 1 preset chunk (the exact `chunk` region of a Serum `.fxp`).
 
-use flate2::read::ZlibDecoder;
-
 /// Size of the decompressed Serum 1 preset state for contemporary presets.
 pub const SERUM1_STATE_SIZE: usize = 172_736;
 /// Offset of the 32-byte preset name inside the decompressed state.
@@ -14,19 +12,8 @@ pub const OFF_AUTHOR: usize = 0x49A0;
 /// Offset of the 48-byte category string inside the decompressed state.
 pub const OFF_CATEGORY: usize = 0x49D0;
 
-const MAX_STREAM_OUT: usize = 16 * 1024 * 1024;
-
-#[derive(Debug)]
-pub struct SerumError(pub String);
-
-impl std::fmt::Display for SerumError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-fn err<T>(msg: impl Into<String>) -> Result<T, SerumError> {
-    Err(SerumError(msg.into()))
+fn err<T>(msg: impl Into<String>) -> Result<T, String> {
+    Err(msg.into())
 }
 
 /// Where the Serum 1 chunk was recovered from (for diagnostics).
@@ -44,7 +31,7 @@ pub enum SourceKind {
 }
 
 /// Metadata read from the decompressed 172,736-byte preset state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PresetMeta {
     pub preset_name: String,
     pub author: String,
@@ -108,89 +95,49 @@ pub fn is_serum2(name: &[u8], filename: &[u8]) -> bool {
     name == "serum2" || name.starts_with("serum 2") || basename.starts_with("serum2")
 }
 
-/// Inflate one zlib stream starting at `data[0]`.
-/// Returns the decompressed bytes and the number of input bytes consumed.
-fn inflate_stream(data: &[u8]) -> Result<(Vec<u8>, usize), SerumError> {
-    use std::io::Read;
-    if data.is_empty() || data[0] != 0x78 {
-        return err("not a zlib stream (expected 0x78 header byte)");
-    }
-    let mut dec = ZlibDecoder::new(data);
-    let mut out = Vec::with_capacity(4096);
-    let mut chunk = [0u8; 64 * 1024];
-    loop {
-        match dec.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                out.extend_from_slice(&chunk[..n]);
-                if out.len() > MAX_STREAM_OUT {
-                    return err("decompressed stream exceeds sanity limit");
-                }
-            }
-            Err(e) => return err(format!("zlib error: {e}")),
-        }
-    }
-    Ok((out, dec.total_in() as usize))
+/// Basename of a plugin path with known extensions stripped
+/// (`.vst3`/`.vst`/`.dll`/`.vstpreset`), lowercased.
+pub fn plugin_basename(filename: &[u8]) -> String {
+    String::from_utf8_lossy(filename)
+        .trim()
+        .to_ascii_lowercase()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(".vst3")
+        .trim_end_matches(".vst")
+        .trim_end_matches(".dll")
+        .trim_end_matches(".vstpreset")
+        .to_string()
 }
 
-/// Split a Serum 1 chunk into its zlib streams and validate the trailer.
-///
-/// Layout: `[zlib stream 0][zlib stream 1]...[u32 LE trailer]` where the
-/// trailer equals the compressed size of stream 0 (the preset state; the
-/// remaining streams carry embedded wavetable / noise data). A minimal zlib
-/// stream is 8 bytes, so a 4-byte tail can only be the trailer.
-fn analyze_chunk(chunk: &[u8]) -> Result<(Vec<Vec<u8>>, bool), SerumError> {
-    if chunk.len() < 8 {
-        return err("chunk too small to contain a zlib stream");
+/// Serum 1 *synth* only — excludes "Serum FX" and Serum 2.
+pub fn is_serum1_synth(name: &[u8], filename: &[u8]) -> bool {
+    let name = String::from_utf8_lossy(name).trim().to_ascii_lowercase();
+    let base = plugin_basename(filename);
+    if name == "serum2"
+        || name.starts_with("serum 2")
+        || base == "serum2"
+        || base.starts_with("serum2")
+    {
+        return false;
     }
-    let candidate_trailer =
-        u32::from_le_bytes(chunk[chunk.len() - 4..].try_into().unwrap()) as usize;
-    let mut pos = 0usize;
-    let mut streams = Vec::new();
-    while chunk.len() - pos > 4 {
-        if chunk[pos] != 0x78 {
-            if pos == 0 {
-                return err("chunk does not start with a zlib stream");
-            }
-            break;
-        }
-        let (out, consumed) = match inflate_stream(&chunk[pos..]) {
-            Ok(v) => v,
-            Err(e) => {
-                if pos == 0 {
-                    return Err(e);
-                }
-                break;
-            }
-        };
-        streams.push(out);
-        pos += consumed;
-    }
-    if streams.is_empty() {
-        return err("chunk contains no zlib streams");
-    }
-    // The consumed prefix must cover every byte except the trailer.
-    let clean_tail = chunk.len() - pos == 4;
-    let (_, s0_len) = inflate_stream(chunk)?;
-    let has_trailer = clean_tail && candidate_trailer == s0_len;
-    Ok((streams, has_trailer))
+    name == "serum" || name == "serum_x64" || base == "serum" || base == "serum_x64"
 }
 
-fn read_cstr(buf: &[u8], off: usize, len: usize) -> String {
-    let end = (off + len).min(buf.len());
-    if off >= buf.len() {
-        return String::new();
-    }
-    let s = &buf[off..end];
-    let nul = s.iter().position(|&b| b == 0).unwrap_or(s.len());
-    String::from_utf8_lossy(&s[..nul]).trim().to_string()
+/// True for the "Serum FX" plugin variant (the FX is never converted).
+pub fn is_serum_fx(name: &[u8], filename: &[u8]) -> bool {
+    String::from_utf8_lossy(name)
+        .trim()
+        .eq_ignore_ascii_case("serum fx")
+        || plugin_basename(filename) == "serum fx"
 }
 
 fn parse_meta(state: &[u8]) -> PresetMeta {
     PresetMeta {
-        preset_name: read_cstr(state, OFF_PRESET_NAME, 32),
-        author: read_cstr(state, OFF_AUTHOR, 48),
-        category: read_cstr(state, OFF_CATEGORY, 48),
+        preset_name: crate::core::cstr(state, OFF_PRESET_NAME, 32, true),
+        author: crate::core::cstr(state, OFF_AUTHOR, 48, true),
+        category: crate::core::cstr(state, OFF_CATEGORY, 48, true),
         version_f32: if state.len() >= OFF_VERSION_F32 + 4 {
             f32::from_le_bytes(
                 state[OFF_VERSION_F32..OFF_VERSION_F32 + 4]
@@ -205,31 +152,30 @@ fn parse_meta(state: &[u8]) -> PresetMeta {
 
 /// Walk FL Studio's VST3 wrapper state and return the cid-3 payload
 /// (the plugin's own saved state), if the layout matches.
+///
+/// Acceptance requires the record walk to consume the state exactly, with at
+/// least two records including the 64-byte cid-1 header record.
 fn fl_vst3_wrapper_cid3(state: &[u8]) -> Option<&[u8]> {
     for start in 0..=8usize {
-        let mut pos = start;
+        let Some(rest) = state.get(start..) else {
+            continue;
+        };
+        let Some(mut recs) = crate::flp::records(rest) else {
+            continue;
+        };
         let mut found: Option<&[u8]> = None;
         let mut nchunks = 0usize;
         let mut has_cid1 = false;
-        while pos + 12 <= state.len() {
-            let cid = u32::from_le_bytes(state[pos..pos + 4].try_into().unwrap());
-            let sz = u64::from_le_bytes(state[pos + 4..pos + 12].try_into().unwrap());
-            let Some(sz) = usize::try_from(sz).ok() else {
-                break;
-            };
-            if pos + 12 + sz > state.len() {
-                break;
-            }
-            if cid == 1 && sz == 64 {
+        for (cid, data) in recs.by_ref() {
+            if cid == 1 && data.len() == 64 {
                 has_cid1 = true;
             }
             if cid == 3 && found.is_none() {
-                found = Some(&state[pos + 12..pos + 12 + sz]);
+                found = Some(data);
             }
             nchunks += 1;
-            pos += 12 + sz;
         }
-        if pos == state.len() && nchunks >= 2 && has_cid1 {
+        if !recs.overran() && recs.pos() == rest.len() && nchunks >= 2 && has_cid1 {
             return found;
         }
     }
@@ -237,7 +183,7 @@ fn fl_vst3_wrapper_cid3(state: &[u8]) -> Option<&[u8]> {
 }
 
 /// Extract the `CcnK` preset chunk out of a complete VST2 fxp/fxb blob.
-fn chunk_from_ccnk(blob: &[u8]) -> Result<&[u8], SerumError> {
+fn chunk_from_ccnk(blob: &[u8]) -> Result<&[u8], String> {
     if blob.len() < 0x3C || &blob[0..4] != b"CcnK" {
         return err("bad CcnK blob");
     }
@@ -262,7 +208,7 @@ fn chunk_from_ccnk(blob: &[u8]) -> Result<&[u8], SerumError> {
 }
 
 /// Recover the Serum 1 preset chunk from a `PluginParams` state payload.
-pub fn serum1_chunk_from_state(state: &[u8]) -> Result<Serum1Chunk, SerumError> {
+pub fn serum1_chunk_from_state(state: &[u8]) -> Result<Serum1Chunk, String> {
     if state.is_empty() {
         return err("plugin state is empty");
     }
@@ -276,7 +222,7 @@ pub fn serum1_chunk_from_state(state: &[u8]) -> Result<Serum1Chunk, SerumError> 
         let off = state[..64.min(state.len())]
             .windows(4)
             .position(|w| w == b"CcnK")
-            .ok_or_else(|| SerumError("VstW wrapper without CcnK blob".into()))?;
+            .ok_or_else(|| String::from("VstW wrapper without CcnK blob"))?;
         (chunk_from_ccnk(&state[off..])?, SourceKind::VstWFxPreset)
     } else if state.starts_with(b"CcnK") {
         (chunk_from_ccnk(state)?, SourceKind::CcnKFxPreset)
@@ -286,7 +232,7 @@ pub fn serum1_chunk_from_state(state: &[u8]) -> Result<Serum1Chunk, SerumError> 
         return err("unrecognized plugin state layout");
     };
 
-    let (streams, has_trailer) = analyze_chunk(raw)?;
+    let (streams, has_trailer) = crate::zlibio::split_chunk(raw)?;
     let stream0 = &streams[0];
     if stream0.len() > SERUM1_STATE_SIZE {
         return err(format!(
@@ -300,7 +246,7 @@ pub fn serum1_chunk_from_state(state: &[u8]) -> Result<Serum1Chunk, SerumError> 
     if !has_trailer {
         // Serum 2's importer silently rejects chunks without the trailer
         // word; append it (compressed size of stream 0) at the end.
-        let (_, s0_len) = inflate_stream(raw)?;
+        let (_, s0_len) = crate::zlibio::inflate(raw, crate::zlibio::MAX_STREAM)?;
         chunk.extend_from_slice(&(s0_len as u32).to_le_bytes());
     }
 
@@ -315,15 +261,7 @@ pub fn serum1_chunk_from_state(state: &[u8]) -> Result<Serum1Chunk, SerumError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn zlib_stream(data: &[u8]) -> Vec<u8> {
-        use flate2::Compression;
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
-        let mut e = ZlibEncoder::new(Vec::new(), Compression::new(1));
-        e.write_all(data).unwrap();
-        e.finish().unwrap()
-    }
+    use crate::testutil::zlib_stream;
 
     fn synthetic_state() -> Vec<u8> {
         let mut s0 = vec![0u8; SERUM1_STATE_SIZE];

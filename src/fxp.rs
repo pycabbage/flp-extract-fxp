@@ -97,27 +97,6 @@ pub fn build_fxp(chunk: &[u8], preset_name: &str) -> Vec<u8> {
     out
 }
 
-/// Inflate one zlib stream; returns (data, consumed).
-fn inflate_stream(data: &[u8]) -> Result<(Vec<u8>, usize), String> {
-    use std::io::Read;
-    let mut dec = flate2::read::ZlibDecoder::new(data);
-    let mut out = Vec::with_capacity(4096);
-    let mut chunk = [0u8; 64 * 1024];
-    loop {
-        match dec.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                out.extend_from_slice(&chunk[..n]);
-                if out.len() > 16 * 1024 * 1024 {
-                    return Err("decompressed stream exceeds sanity limit".into());
-                }
-            }
-            Err(e) => return Err(format!("zlib error: {e}")),
-        }
-    }
-    Ok((out, dec.total_in() as usize))
-}
-
 /// Validate an fxp against the checks the Serum 2 importer performs.
 ///
 /// The rule set below mirrors the disassembled import path of
@@ -125,15 +104,24 @@ fn inflate_stream(data: &[u8]) -> Result<(Vec<u8>, usize), String> {
 /// with no [`Severity::Fatal`] issue is accepted by that code path.
 pub fn validate_fxp(data: &[u8]) -> ValidationReport {
     let mut r = ValidationReport::default();
+    if !check_importer_rules(data, &mut r) {
+        return r;
+    }
+    check_structure(data, &mut r);
+    r
+}
 
-    // --- rules reimplemented from the Serum 2 importer ---
+/// Rules reimplemented from the Serum 2 importer. Returns `false` when the
+/// file is too malformed to continue (the report already carries the
+/// fatals); the structural checks are skipped in that case.
+fn check_importer_rules(data: &[u8], r: &mut ValidationReport) -> bool {
     if data.len() < 0x3D {
         r.fatal(format!("file too small ({} bytes, need >= 61)", data.len()));
-        return r;
+        return false;
     }
     if &data[0..4] != b"CcnK" {
         r.fatal("missing \"CcnK\" magic at offset 0");
-        return r;
+        return false;
     }
     if &data[0x10..0x13] != b"Xfs" {
         r.fatal(format!(
@@ -176,7 +164,7 @@ pub fn validate_fxp(data: &[u8]) -> ValidationReport {
             // Serum 1 presets store the state zlib-compressed; the loader
             // also tolerates raw (uncompressed) state bytes.
             let (state, _consumed): (Vec<u8>, usize) = if blob.first() == Some(&0x78) {
-                match inflate_stream(blob) {
+                match crate::zlibio::inflate(blob, crate::zlibio::MAX_STREAM) {
                     Err(e) => {
                         r.fatal(format!("state zlib stream does not inflate: {e}"));
                         (Vec::new(), 0)
@@ -230,8 +218,11 @@ pub fn validate_fxp(data: &[u8]) -> ValidationReport {
             }
         }
     }
+    true
+}
 
-    // --- extra structural checks (how genuine Serum 1 files look) ---
+/// Extra structural checks (how genuine Serum 1 files look).
+fn check_structure(data: &[u8], r: &mut ValidationReport) {
     let byte_size = u32::from_be_bytes(data[4..8].try_into().unwrap()) as usize;
     if byte_size != data.len() {
         r.warn(format!(
@@ -253,7 +244,6 @@ pub fn validate_fxp(data: &[u8]) -> ValidationReport {
             0x3C + v2
         ));
     }
-    r
 }
 
 /// Validate a bare chunk (zlib streams + trailer) against the Serum 2 rules
@@ -272,22 +262,17 @@ pub fn inflate_state(data: &[u8]) -> Result<(Vec<u8>, usize), String> {
         return Err("chunkSize overruns file".into());
     }
     let n = u32::from_le_bytes(data[0x38 + v..0x38 + v + 4].try_into().unwrap()) as usize;
-    inflate_stream(&data[0x3C..(0x3C + n).min(data.len())])
+    crate::zlibio::inflate(
+        &data[0x3C..(0x3C + n).min(data.len())],
+        crate::zlibio::MAX_STREAM,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::serum::SERUM1_STATE_SIZE;
-
-    fn zlib_stream(data: &[u8]) -> Vec<u8> {
-        use flate2::Compression;
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
-        let mut e = ZlibEncoder::new(Vec::new(), Compression::new(1));
-        e.write_all(data).unwrap();
-        e.finish().unwrap()
-    }
+    use crate::testutil::zlib_stream;
 
     fn sample_chunk() -> Vec<u8> {
         let mut s0 = vec![0u8; SERUM1_STATE_SIZE];

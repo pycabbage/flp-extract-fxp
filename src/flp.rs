@@ -24,21 +24,21 @@ pub struct Event<'a> {
     pub data: &'a [u8],
 }
 
-#[derive(Debug)]
-pub struct FlpError(pub String);
-
-impl std::fmt::Display for FlpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-fn err<T>(msg: impl Into<String>) -> Result<T, FlpError> {
-    Err(FlpError(msg.into()))
+fn err<T>(msg: impl Into<String>) -> Result<T, String> {
+    Err(msg.into())
 }
 
 /// Parse the event stream out of an (uncompressed) FLP file.
-pub fn parse_events(buf: &[u8]) -> Result<Vec<Event<'_>>, FlpError> {
+pub fn parse_events(buf: &[u8]) -> Result<Vec<Event<'_>>, String> {
+    Ok(parse_event_spans(buf)?
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect())
+}
+
+/// Like [`parse_events`], but also returns the byte offset of every event's
+/// id within `buf` (the events sit back-to-back inside the FLdt payload).
+pub fn parse_event_spans(buf: &[u8]) -> Result<Vec<(usize, Event<'_>)>, String> {
     if buf.len() < 8 {
         return err("file is too small to be an FLP");
     }
@@ -80,10 +80,13 @@ pub fn parse_events(buf: &[u8]) -> Result<Vec<Event<'_>>, FlpError> {
                 "event {id} at offset {ev_offset:#x} overruns the FLdt chunk"
             ));
         }
-        events.push(Event {
-            id,
-            data: &buf[pos..pos + dlen],
-        });
+        events.push((
+            ev_offset,
+            Event {
+                id,
+                data: &buf[pos..pos + dlen],
+            },
+        ));
         pos += dlen;
     }
     Ok(events)
@@ -121,12 +124,76 @@ const PLUGIN_CHUNK_NAME: u32 = 54;
 const PLUGIN_CHUNK_FILENAME: u32 = 55;
 const PLUGIN_CHUNK_VENDOR: u32 = 56;
 
+/// Iterator over a `[u32 cid][u64 LE size][data]` record sequence. Yields
+/// `(cid, data)` for every complete record; stops (yields `None`) as soon as
+/// the remaining bytes cannot form one.
+pub struct Records<'a> {
+    buf: &'a [u8],
+    pos: usize,
+    /// A record header was readable but its payload overran `buf`.
+    overran: bool,
+}
+
+impl<'a> Records<'a> {
+    pub fn new(buf: &'a [u8]) -> Records<'a> {
+        Records {
+            buf,
+            pos: 0,
+            overran: false,
+        }
+    }
+
+    /// Offset just past the last complete record consumed.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Iteration stopped early: a record header was readable but its payload
+    /// overran the buffer.
+    pub fn overran(&self) -> bool {
+        self.overran
+    }
+}
+
+impl<'a> Iterator for Records<'a> {
+    type Item = (u32, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.overran || self.pos + 12 > self.buf.len() {
+            return None;
+        }
+        let cid = u32::from_le_bytes(self.buf[self.pos..self.pos + 4].try_into().unwrap());
+        let sz = u64::from_le_bytes(self.buf[self.pos + 4..self.pos + 12].try_into().unwrap());
+        let Ok(sz) = usize::try_from(sz) else {
+            self.overran = true;
+            return None;
+        };
+        self.pos += 12;
+        if sz > self.buf.len() - self.pos {
+            self.overran = true;
+            return None;
+        }
+        let data = &self.buf[self.pos..self.pos + sz];
+        self.pos += sz;
+        Some((cid, data))
+    }
+}
+
+/// Record walk over `buf`; `None` when `buf` holds fewer than 4 bytes.
+pub fn records(buf: &[u8]) -> Option<Records<'_>> {
+    if buf.len() < 4 {
+        None
+    } else {
+        Some(Records::new(buf))
+    }
+}
+
 /// Parse the chunk sequence of a `PluginParams` event payload.
 ///
 /// Layout: `u32 LE format version`, then a sequence of
 /// `[u32 LE chunk id][u32 LE size lo][u32 LE size hi][data]` records.
 /// Chunk ids 53..56 carry the plugin state / name / filename / vendor.
-pub fn parse_plugin_params(data: &[u8]) -> Result<PluginParams<'_>, FlpError> {
+pub fn parse_plugin_params(data: &[u8]) -> Result<PluginParams<'_>, String> {
     if data.len() < 4 {
         return err("PluginParams payload too small");
     }
@@ -137,22 +204,8 @@ pub fn parse_plugin_params(data: &[u8]) -> Result<PluginParams<'_>, FlpError> {
         out.state = &data[4..];
         return Ok(out);
     }
-    let mut pos = 4usize;
-    while pos + 12 <= data.len() {
-        let cid = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-        let sz_lo = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as u64;
-        let sz_hi = u32::from_le_bytes(data[pos + 8..pos + 12].try_into().unwrap()) as u64;
-        let sz = sz_lo | (sz_hi << 32);
-        pos += 12;
-        let Some(sz) = usize::try_from(sz).ok() else {
-            return err("plugin chunk size overflows address space");
-        };
-        if pos + sz > data.len() {
-            return err(format!(
-                "plugin chunk {cid} (size {sz}) overruns PluginParams payload"
-            ));
-        }
-        let payload = &data[pos..pos + sz];
+    let mut recs = Records::new(&data[4..]);
+    for (cid, payload) in recs.by_ref() {
         match cid {
             PLUGIN_CHUNK_STATE => out.state = payload,
             PLUGIN_CHUNK_NAME => out.name = payload,
@@ -160,7 +213,9 @@ pub fn parse_plugin_params(data: &[u8]) -> Result<PluginParams<'_>, FlpError> {
             PLUGIN_CHUNK_VENDOR => out.vendor = payload,
             _ => {}
         }
-        pos += sz;
+    }
+    if recs.overran() {
+        return err("a plugin chunk overruns the PluginParams payload");
     }
     Ok(out)
 }
@@ -168,44 +223,7 @@ pub fn parse_plugin_params(data: &[u8]) -> Result<PluginParams<'_>, FlpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn build_flp(events: &[(u8, Vec<u8>)]) -> Vec<u8> {
-        let mut dt = Vec::new();
-        for (id, data) in events {
-            dt.push(*id);
-            if *id >= 192 {
-                // varint length
-                let mut len = data.len() as u32;
-                loop {
-                    let b = (len & 0x7f) as u8;
-                    len >>= 7;
-                    if len == 0 {
-                        dt.push(b);
-                        break;
-                    }
-                    dt.push(b | 0x80);
-                }
-            } else {
-                assert_eq!(
-                    data.len(),
-                    match id {
-                        0..=63 => 1,
-                        64..=127 => 2,
-                        _ => 4,
-                    }
-                );
-            }
-            dt.extend_from_slice(data);
-        }
-        let mut out = Vec::new();
-        out.extend_from_slice(b"FLhd");
-        out.extend_from_slice(&6u32.to_le_bytes());
-        out.extend_from_slice(&[0, 0, 0x46, 0, 0x60, 0]);
-        out.extend_from_slice(b"FLdt");
-        out.extend_from_slice(&(dt.len() as u32).to_le_bytes());
-        out.extend_from_slice(&dt);
-        out
-    }
+    use crate::testutil::build_flp;
 
     #[test]
     fn parses_event_framing() {

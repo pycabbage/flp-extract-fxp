@@ -26,12 +26,20 @@ import {
   formatBytes,
   presetFilename,
 } from "@/lib/download"
-import { buildFxp, convert, initWasm, scan, type ConvertOutcome, type Preset } from "@/lib/wasm"
+import {
+  convert,
+  initWasm,
+  scanDoc,
+  type ConvertOutcome,
+  type FlpDocHandle,
+  type Preset,
+} from "@/lib/wasm"
 
 import { ThemeProvider } from "./components/theme-provider"
 
 export default function App() {
   const [result, setResult] = useState<ScanResult | null>(null)
+  const [doc, setDoc] = useState<FlpDocHandle | null>(null)
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -54,18 +62,20 @@ export default function App() {
     try {
       await initWasm()
       const data = new Uint8Array(await file.arrayBuffer())
-      const report = scan(data)
-      const unique = report.presets.filter((p) => !p.duplicate)
-      const duplicates = report.presets.length - unique.length
+      const scanned = scanDoc(data)
+      doc?.free()
+      setDoc(scanned)
+      const unique = scanned.presets.filter((p) => !p.duplicate)
+      const duplicates = scanned.presets.length - unique.length
       setResult({
         fileName: file.name,
         fileData: data,
         presets: unique,
         duplicates,
-        serum2Skipped: report.serum2Skipped,
-        failed: report.failed,
+        serum2Skipped: scanned.serum2Skipped,
+        failed: scanned.failedJson,
       })
-      if (unique.length === 0 && report.failed.length > 0) {
+      if (unique.length === 0 && scanned.failedJson.length > 0) {
         toast.error(`No presets extracted from ${file.name}`)
       } else {
         toast.success(
@@ -75,7 +85,7 @@ export default function App() {
               : "")
         )
       }
-      for (const message of report.failed) {
+      for (const message of scanned.failedJson) {
         toast.warning(message)
       }
     } catch (err) {
@@ -116,9 +126,9 @@ export default function App() {
   }
 
   const downloadOne = (preset: Preset) => {
-    if (!result) return
+    if (!doc) return
     try {
-      const bytes = buildFxp(result.fileData, preset.index)
+      const bytes = doc.buildFxp(preset.index)
       const name = presetFilename(preset)
       downloadBlob(bytes, name)
       toast.success(`Downloaded ${name} (${formatBytes(bytes.length)})`)
@@ -129,11 +139,11 @@ export default function App() {
   }
 
   const downloadSelectedZip = () => {
-    if (!result) return
+    if (!result || !doc) return
     const chosen = rows.filter((r) => selected.has(r.index))
     if (chosen.length === 0) return
     try {
-      const zip = buildZip(result.fileData, chosen)
+      const zip = buildZip((index) => doc.buildFxp(index), chosen)
       const base = result.fileName.replace(/\.[^.]+$/, "") || "presets"
       const name = `${base}-selected.zip`
       downloadBlob(zip, name)
@@ -145,10 +155,10 @@ export default function App() {
   }
 
   const downloadZip = () => {
-    if (!result) return
+    if (!result || !doc) return
     if (rows.length === 0) return
     try {
-      const zip = buildZip(result.fileData, rows)
+      const zip = buildZip((index) => doc.buildFxp(index), rows)
       const base = result.fileName.replace(/\.[^.]+$/, "") || "presets"
       const name = `${base}-fxp.zip`
       downloadBlob(zip, name)

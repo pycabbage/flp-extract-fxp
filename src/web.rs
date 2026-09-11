@@ -2,13 +2,12 @@
 //!
 //! This module is only compiled for `wasm32-unknown-unknown` (same cfg gate
 //! as in `lib.rs`), so native CLI builds never reference it. It mirrors the
-//! three CLI operations:
+//! CLI operations:
 //!
-//! - [`scan_flp`] / [`scan_flp_report`]: scan an FLP for Serum 1 instances.
-//! - [`build_fxp`]: assemble the Serum-2-loadable `.fxp` bytes for one
-//!   instance (same ordering as [`scan_flp`]).
-//! - [`validate_fxp_bytes`]: run the Serum 2 import checks on raw bytes and
-//!   return the report as JSON.
+//! - [`scan_flp_report`]: scan an FLP for Serum 1 instances (one-shot).
+//! - [`scan_doc`]: the session variant — keeps every preset's raw chunk in
+//!   an [`FlpDoc`] so the browser can assemble the `.fxp` bytes for any
+//!   preset via [`FlpDoc::build_fxp`] without re-scanning the document.
 //! - [`convert_flp`]: rewrite every Serum 1 synth instance in place as a
 //!   Serum 2 instance and return the converted FLP bytes plus a report.
 //!
@@ -27,6 +26,7 @@ use wasm_bindgen::prelude::*;
 use crate::core::{self, Instance};
 use crate::flpconv::{self, BundleSource};
 use crate::fxp;
+use crate::serum;
 
 /// Escape a string for embedding inside a JSON document.
 fn json_escape(s: &str) -> String {
@@ -56,7 +56,7 @@ fn json_string_array<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
     format!("[{}]", parts.join(","))
 }
 
-/// One Serum 1 instance found by [`scan_flp`], in file order.
+/// One Serum 1 instance found by a scan, in file order.
 ///
 /// Every field is readable from JavaScript through a generated camelCase
 /// getter; `warnings_json` / `errors_json` are already-serialized JSON
@@ -85,7 +85,8 @@ pub struct WasmPreset {
 
 #[wasm_bindgen]
 impl WasmPreset {
-    /// Zero-based position in the scan order; pass this to [`build_fxp`].
+    /// Zero-based position in the scan order; pass this to
+    /// [`FlpDoc::build_fxp`].
     #[wasm_bindgen(getter)]
     pub fn index(&self) -> u32 {
         self.index
@@ -230,26 +231,6 @@ pub struct ScanReport {
 
 #[wasm_bindgen]
 impl ScanReport {
-    /// Number of Serum 1 instances found.
-    pub fn len(&self) -> usize {
-        self.presets.len()
-    }
-
-    /// True when no Serum 1 instances were found.
-    pub fn is_empty(&self) -> bool {
-        self.presets.is_empty()
-    }
-
-    /// The instance at `index` (same order as [`scan_flp`]).
-    pub fn preset(&self, index: usize) -> Result<WasmPreset, JsValue> {
-        self.presets.get(index).cloned().ok_or_else(|| {
-            JsValue::from_str(&format!(
-                "preset index {index} out of range ({} instance(s) found)",
-                self.presets.len()
-            ))
-        })
-    }
-
     /// All instances as a JS array (clone of the internal list).
     pub fn presets(&self) -> Vec<WasmPreset> {
         self.presets.clone()
@@ -269,97 +250,127 @@ impl ScanReport {
     }
 }
 
-/// Shared scan implementation behind [`scan_flp`] and [`scan_flp_report`].
-fn scan_impl(data: &[u8]) -> Result<ScanReport, JsValue> {
+/// Shared scan internals behind [`scan_flp_report`] and [`scan_doc`]: the
+/// JS-facing preset views in file order, each preset's raw Serum 1 chunk
+/// (same order), and the scan-wide diagnostics.
+struct ScanPieces {
+    presets: Vec<WasmPreset>,
+    chunks: Vec<Vec<u8>>,
+    failed_json: String,
+    serum2_skipped: u32,
+}
+
+/// Shared scan implementation: one walk over the FLP, shared by
+/// [`scan_flp_report`] and [`scan_doc`] so both produce identical
+/// [`WasmPreset`] lists.
+fn scan_impl(data: &[u8]) -> Result<ScanPieces, JsValue> {
     let (instances, stats) = core::scan_serum_instances(data).map_err(|e| JsValue::from_str(&e))?;
     let mut seen: HashSet<u64> = HashSet::new();
     let mut presets = Vec::with_capacity(instances.len());
+    let mut chunks = Vec::with_capacity(instances.len());
     for (i, inst) in instances.iter().enumerate() {
         let duplicate = !seen.insert(core::hash_bytes(&inst.chunk.chunk));
         presets.push(WasmPreset::from_instance(i, inst, duplicate));
+        chunks.push(inst.chunk.chunk.clone());
     }
-    Ok(ScanReport {
+    Ok(ScanPieces {
         presets,
+        chunks,
         failed_json: json_string_array(stats.failed.iter().map(|s| s.as_str())),
         serum2_skipped: stats.serum2_count as u32,
     })
 }
 
-/// Scan an FLP file for Serum 1 plugin instances.
+/// Scan an FLP file for Serum 1 plugin instances and return a
+/// [`ScanReport`].
 ///
-/// `data` are the raw `.flp` bytes. Returns the instances in file order;
-/// duplicates of an earlier identical chunk are still returned but flagged
-/// with `duplicate == true` (dedupe client-side by `content_hash`).
-/// Unparseable input (zip archive, missing `FLhd`, ...) rejects with a
-/// human-readable message; per-instance conversion failures are not fatal
-/// (use [`scan_flp_report`] to see them).
-#[wasm_bindgen]
-pub fn scan_flp(data: &[u8]) -> Result<Vec<WasmPreset>, JsValue> {
-    Ok(scan_impl(data)?.presets)
-}
-
-/// Like [`scan_flp`], but returns a [`ScanReport`] that also carries the
-/// failed per-instance conversions (`failed_json`) and the number of
-/// skipped Serum 2 instances.
+/// `data` are the raw `.flp` bytes. Duplicates of an earlier identical
+/// chunk are still returned but flagged with `duplicate == true` (dedupe
+/// client-side by `content_hash`). Unparseable input (zip archive, missing
+/// `FLhd`, ...) rejects with a human-readable message; per-instance
+/// conversion failures are not fatal (see [`ScanReport::failed_json`]).
 #[wasm_bindgen]
 pub fn scan_flp_report(data: &[u8]) -> Result<ScanReport, JsValue> {
-    scan_impl(data)
+    let scan = scan_impl(data)?;
+    Ok(ScanReport {
+        presets: scan.presets,
+        failed_json: scan.failed_json,
+        serum2_skipped: scan.serum2_skipped,
+    })
 }
 
-/// Assemble the Serum-2-loadable `.fxp` bytes for the instance at `index`
-/// (same order as [`scan_flp`]). The `prgName` inside the file is the
-/// instance's embedded preset name, matching the CLI output.
-#[wasm_bindgen]
-pub fn build_fxp(data: &[u8], index: u32) -> Result<Vec<u8>, JsValue> {
-    let (instances, _stats) =
-        core::scan_serum_instances(data).map_err(|e| JsValue::from_str(&e))?;
-    let inst = instances.get(index as usize).ok_or_else(|| {
-        JsValue::from_str(&format!(
-            "preset index {index} out of range ({} Serum 1 instance(s) found)",
-            instances.len()
-        ))
-    })?;
-    Ok(fxp::build_fxp(
-        &inst.chunk.chunk,
-        &inst.chunk.meta.preset_name,
-    ))
-}
-
-/// Validate raw `.fxp` bytes against Serum 2's Serum-1 import rules.
+/// A scanned FLP document: the Serum 1 presets plus their raw chunks, kept
+/// for the session so the browser can assemble `.fxp` bytes for any preset
+/// in O(1) instead of re-scanning the whole file per download.
 ///
-/// Returns a JSON string:
-/// `{"valid":bool,"issues":[{"severity":"fatal"|"warning","message":"..."}]}`.
+/// [`FlpDoc::presets`] returns the same views as [`ScanReport::presets`],
+/// and [`FlpDoc::build_fxp`] indexes both lists identically.
 #[wasm_bindgen]
-pub fn validate_fxp_bytes(data: &[u8]) -> Result<String, JsValue> {
-    let report = fxp::validate_fxp(data);
-    let issues: Vec<String> = report
-        .issues
-        .iter()
-        .map(|i| {
-            let sev = match i.severity {
-                fxp::Severity::Fatal => "fatal",
-                fxp::Severity::Warning => "warning",
-            };
-            format!(
-                "{{\"severity\":\"{sev}\",\"message\":\"{}\"}}",
-                json_escape(&i.message)
-            )
-        })
-        .collect();
-    Ok(format!(
-        "{{\"valid\":{},\"issues\":[{}]}}",
-        report.is_ok(),
-        issues.join(",")
-    ))
+pub struct FlpDoc {
+    presets: Vec<WasmPreset>,
+    chunks: Vec<Vec<u8>>,
+    failed_json: String,
+    serum2_skipped: u32,
+}
+
+#[wasm_bindgen]
+impl FlpDoc {
+    /// All instances as a JS array (clone of the internal list).
+    pub fn presets(&self) -> Vec<WasmPreset> {
+        self.presets.clone()
+    }
+
+    /// Assemble the Serum-2-loadable `.fxp` bytes for the instance at
+    /// `index` (same order as [`FlpDoc::presets`]). The `prgName` inside
+    /// the file is the instance's embedded preset name, matching the CLI
+    /// output.
+    pub fn build_fxp(&self, index: usize) -> Result<Vec<u8>, JsValue> {
+        let preset = self.presets.get(index).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "preset index {index} out of range ({} Serum 1 instance(s) found)",
+                self.presets.len()
+            ))
+        })?;
+        let chunk = self.chunks.get(index).ok_or_else(|| {
+            JsValue::from_str("internal error: preset chunk list out of sync with presets")
+        })?;
+        Ok(fxp::build_fxp(chunk, &preset.preset_name))
+    }
+
+    /// Failed per-instance conversions as an already-serialized JSON string
+    /// array of human-readable messages (empty array when none).
+    #[wasm_bindgen(getter)]
+    pub fn failed_json(&self) -> String {
+        self.failed_json.clone()
+    }
+
+    /// Number of Serum 2 instances skipped during the scan.
+    #[wasm_bindgen(getter)]
+    pub fn serum2_skipped(&self) -> u32 {
+        self.serum2_skipped
+    }
+}
+
+/// Scan an FLP file into a reusable [`FlpDoc`] (same behavior as
+/// [`scan_flp_report`]; the document additionally retains the chunks).
+#[wasm_bindgen]
+pub fn scan_doc(data: &[u8]) -> Result<FlpDoc, JsValue> {
+    let scan = scan_impl(data)?;
+    Ok(FlpDoc {
+        presets: scan.presets,
+        chunks: scan.chunks,
+        failed_json: scan.failed_json,
+        serum2_skipped: scan.serum2_skipped,
+    })
 }
 
 /// Convert every Serum 1 synth instance in the FLP to a Serum 2 instance.
 ///
 /// The orchestration mirrors the CLI's `convert` command: plan via
-/// [`flpconv::scan_convertible`], build one Serum 2 bundle per instance
-/// through [`flpconv::RealSource::embedded`] (importer + embedded templates),
-/// then splice everything back with [`flpconv::apply`]. Serum FX instances
-/// are deliberately left untouched (reported as warnings).
+/// [`flpconv::scan_convertible_detailed`], build one Serum 2 bundle per
+/// plan through [`flpconv::RealSource::embedded`] (importer + embedded
+/// templates), then splice everything back with [`flpconv::apply`]. Serum
+/// FX instances are deliberately left untouched (reported as warnings).
 ///
 /// Per-instance conversion failures are never fatal: the instance stays
 /// unconverted and the reason is added to `warnings_json`.
@@ -409,43 +420,24 @@ impl ConvertReport {
 pub fn convert_flp(data: &[u8]) -> Result<ConvertReport, JsValue> {
     let (plans, mut warnings) =
         flpconv::scan_convertible_detailed(data).map_err(|e| JsValue::from_str(&e))?;
-    let (instances, _stats) =
-        core::scan_serum_instances(data).map_err(|e| JsValue::from_str(&e))?;
-    // The core scan also reports Serum FX instances, which the planner
-    // deliberately leaves untouched — drop them so the two lists line up
-    // (same bookkeeping check as the CLI).
-    let instances: Vec<Instance> = instances
-        .into_iter()
-        .filter(|i| !i.plugin_name.eq_ignore_ascii_case("serum fx"))
-        .collect();
-    if instances.len() != plans.len() {
-        return Err(JsValue::from_str(&format!(
-            "instance bookkeeping mismatch: {} convertible plans vs {} scanned Serum 1 chunks",
-            plans.len(),
-            instances.len()
-        )));
-    }
 
     let mut source = flpconv::RealSource::embedded();
     let mut bundles: Vec<Option<flpconv::Serum2Bundle>> = Vec::with_capacity(plans.len());
-    for (i, (plan, inst)) in plans.iter().zip(&instances).enumerate() {
-        if plan.channel != inst.channel
-            || plan.channel_name != inst.channel_name
-            || plan.plugin_name != inst.plugin_name
-        {
-            return Err(JsValue::from_str(&format!(
-                "instance {} bookkeeping mismatch: plan (channel {:?}, '{}', plugin '{}') \
-                 vs scan (channel {:?}, '{}', plugin '{}')",
-                i + 1,
-                plan.channel,
-                plan.channel_name,
-                plan.plugin_name,
-                inst.channel,
-                inst.channel_name,
-                inst.plugin_name,
-            )));
-        }
-        match source.bundle_for(plan, &inst.chunk.chunk) {
+    for (i, plan) in plans.iter().enumerate() {
+        // `bundle_for` prefers the preset captured during the planning walk
+        // (`plan.s1`); the raw chunk is re-derived from the payload only for
+        // plans whose parse failed (so the fallback can report the reason).
+        let fallback;
+        let s1_chunk: &[u8] = match &plan.s1 {
+            Some(_) => &[],
+            None => {
+                fallback = serum::serum1_chunk_from_state(&plan.payload)
+                    .map(|c| c.chunk)
+                    .unwrap_or_default();
+                &fallback
+            }
+        };
+        match source.bundle_for(plan, s1_chunk) {
             Ok(Some(bundle)) => bundles.push(Some(bundle)),
             Ok(None) => {
                 let reason = source
@@ -455,7 +447,7 @@ pub fn convert_flp(data: &[u8]) -> Result<ConvertReport, JsValue> {
                 warnings.push(format!(
                     "instance {} on channel '{}': {reason}",
                     i + 1,
-                    channel_display(&plan.channel_name)
+                    core::display_name(&plan.channel_name)
                 ));
                 bundles.push(None);
             }
@@ -463,7 +455,7 @@ pub fn convert_flp(data: &[u8]) -> Result<ConvertReport, JsValue> {
                 warnings.push(format!(
                     "instance {} on channel '{}': {e}",
                     i + 1,
-                    channel_display(&plan.channel_name)
+                    core::display_name(&plan.channel_name)
                 ));
                 bundles.push(None);
             }
@@ -493,10 +485,4 @@ pub fn convert_flp(data: &[u8]) -> Result<ConvertReport, JsValue> {
         warnings_json: json_string_array(warnings.iter().map(|s| s.as_str())),
         details_json: format!("[{}]", details.join(",")),
     })
-}
-
-/// Fallback channel label for report messages (mirrors `flpconv`'s
-/// `display_name`).
-fn channel_display(name: &str) -> &str {
-    if name.is_empty() { "-" } else { name }
 }
