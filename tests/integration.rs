@@ -272,3 +272,158 @@ fn converted_flp_diff_is_localized() {
         assert_eq!(p.plugin_name, i.plugin_name);
     }
 }
+
+// ---------------------------------------------------------------------------
+// patch subcommand
+// ---------------------------------------------------------------------------
+
+fn extracted_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/extracted_serum1.fxp")
+}
+
+#[test]
+fn patch_fixture_then_validate() {
+    let fixture = extracted_fixture();
+    if !fixture.exists() {
+        eprintln!("skipping: untracked fixture absent (docs/flp-conversion.md)");
+        return;
+    }
+    let dir = temp_dir("patch");
+    let fxp = dir.join("patched.fxp");
+    std::fs::copy(&fixture, &fxp).unwrap();
+
+    let output = Command::new(BIN)
+        .args(["patch", "--name", "Renamed Patch Test", "--out"])
+        .arg(&fxp)
+        .arg(&fixture)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "patch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("patching 1 field(s)"), "{stdout}");
+    assert!(stdout.contains("'Renamed Patch Test'"), "{stdout}");
+    assert!(stdout.contains("validate: PASS"), "{stdout}");
+
+    // The header prgName carries the new name; the CLI validator accepts it.
+    let data = std::fs::read(&fxp).unwrap();
+    assert_eq!(&data[0x1C..0x1C + 18], b"Renamed Patch Test");
+    assert_eq!(&data[0x1C + 18..0x38], &[0u8; 10]);
+    let status = Command::new(BIN)
+        .args(["validate"])
+        .arg(&fxp)
+        .status()
+        .unwrap();
+    assert!(status.success(), "validate failed after patch");
+}
+
+#[test]
+fn patch_dry_run_makes_no_changes() {
+    let fixture = extracted_fixture();
+    if !fixture.exists() {
+        eprintln!("skipping: untracked fixture absent (docs/flp-conversion.md)");
+        return;
+    }
+    let before = std::fs::read(&fixture).unwrap();
+    let output = Command::new(BIN)
+        .args([
+            "patch",
+            "--name",
+            "Should Not Persist",
+            "--author",
+            "Nobody",
+            "--dry-run",
+        ])
+        .arg(&fixture)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "dry-run patch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("dry run: no files written"), "{stdout}");
+    let after = std::fs::read(&fixture).unwrap();
+    assert_eq!(before, after, "dry-run must not touch the input file");
+}
+
+#[test]
+fn patch_rejects_missing_flags_and_bad_files() {
+    let dir = temp_dir("patch_bad");
+    let fxp = dir.join("x.fxp");
+    std::fs::write(&fxp, b"not an fxp at all, but long enough to parse.......").unwrap();
+
+    // No patch flags at all.
+    let output = Command::new(BIN).arg("patch").arg(&fxp).output().unwrap();
+    assert!(!output.status.success(), "no-flag patch must fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("nothing to patch"),
+        "expected a 'nothing to patch' error"
+    );
+
+    // A flag, but garbage input.
+    let output = Command::new(BIN)
+        .args(["patch", "--name", "X"])
+        .arg(&fxp)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "garbage input must fail");
+}
+
+#[test]
+fn patch_flp_fixture_updates_and_reextracts() {
+    if !have_serina1() {
+        return;
+    }
+    const NEW_NAME: &str = "Renamed Patch Test";
+    let dir = temp_dir("patch_flp");
+    let out = dir.join("patched.flp");
+    let output = Command::new(BIN)
+        .args(["patch", "--name", NEW_NAME, "--out"])
+        .arg(&out)
+        .arg(serina1_fixture())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "flp patch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("patching 5 Serum instance(s)"), "{stdout}");
+    assert_eq!(stdout.matches(NEW_NAME).count(), 5, "{stdout}");
+
+    // Non-target events byte-identical: same event count, every non-213
+    // event exactly as before.
+    let orig = std::fs::read(serina1_fixture()).unwrap();
+    let patched = std::fs::read(&out).unwrap();
+    let evs_old = flp_extract_fxp::flp::parse_events(&orig).unwrap();
+    let evs_new = flp_extract_fxp::flp::parse_events(&patched).unwrap();
+    assert_eq!(evs_old.len(), evs_new.len());
+    for (o, n) in evs_old.iter().zip(&evs_new) {
+        if o.id == 213 {
+            continue;
+        }
+        assert_eq!((o.id, &o.data), (n.id, &n.data));
+    }
+
+    // The patched state is visible via re-extraction.
+    let out_dir = dir.join("re");
+    let status = Command::new(BIN)
+        .args(["extract", "--overwrite", "-o"])
+        .arg(&out_dir)
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success(), "re-extract failed");
+    let renamed: Vec<_> = std::fs::read_dir(&out_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(NEW_NAME))
+        .collect();
+    assert_eq!(renamed.len(), 5, "expected 5 renamed presets");
+}

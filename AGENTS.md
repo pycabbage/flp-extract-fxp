@@ -33,9 +33,15 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
   is a target-specific dep for `wasm32-unknown-unknown` only, `ruzstd` is a
   dev-dependency (test-only zstd decoding). Keep new dependencies wasm32-safe
   — the conversion stack must compile identically for both targets.
-- CLI subcommands: `list`, `extract`, `validate`, and
+- CLI subcommands: `list`, `extract`, `validate`,
   `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum instances
-  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`).
+  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`), and
+  `patch <input.fxp|.flp> [--name|--author|--category] [--out] [--dry-run]`
+  (rewrites preset metadata in an fxp or in every Serum instance of an FLP;
+  name goes to prgName@0x1C AND state@0x4972, stream 0 is recompressed at
+  zlib level 1, trailer/chunkSize/byteSize recomputed — `src/fxp.rs`
+  `patch_metadata`/`patch_chunk_fields`, FLP path `src/flpconv.rs`
+  `patch_serum_metadata`).
 
 ## Frontend + wasm (`front/`)
 

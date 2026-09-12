@@ -58,6 +58,27 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Patch preset metadata in a Serum .fxp file (or in every Serum
+    /// instance of an FLP project).
+    Patch {
+        /// A .fxp file, or a .flp project whose Serum instances are patched.
+        input: PathBuf,
+        /// New preset name (goes to the header AND the state blob).
+        #[arg(long)]
+        name: Option<String>,
+        /// New author string.
+        #[arg(long)]
+        author: Option<String>,
+        /// New category string.
+        #[arg(long)]
+        category: Option<String>,
+        /// Output path (default: patch the input in place).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Print what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn run_extract(
@@ -403,6 +424,188 @@ fn run_convert(inputs: &[PathBuf], out: Option<&PathBuf>, dry_run: bool) -> Resu
     Ok(())
 }
 
+/// Write `data` to `path` atomically: temp file in the same directory +
+/// rename over the target.
+fn write_atomic(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "output".into()),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, data).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", path.display()));
+    }
+    Ok(())
+}
+
+/// NUL-terminated string at `off` inside the decompressed state (CLI display
+/// helper; the library keeps `core::cstr` crate-private).
+fn state_str(state: &[u8], off: usize, len: usize) -> String {
+    let end = (off + len).min(state.len());
+    String::from_utf8_lossy(&state[off..end])
+        .trim_end_matches('\0')
+        .trim()
+        .to_string()
+}
+
+fn run_patch(
+    input: &std::path::Path,
+    name: Option<&str>,
+    author: Option<&str>,
+    category: Option<&str>,
+    out: Option<&PathBuf>,
+    dry_run: bool,
+) -> Result<(), String> {
+    let mut patches: Vec<fxp::PatchField> = Vec::new();
+    if let Some(s) = name {
+        patches.push(fxp::PatchField::Name(s.to_string()));
+    }
+    if let Some(s) = author {
+        patches.push(fxp::PatchField::Author(s.to_string()));
+    }
+    if let Some(s) = category {
+        patches.push(fxp::PatchField::Category(s.to_string()));
+    }
+    if patches.is_empty() {
+        return Err("nothing to patch: pass --name and/or --author and/or --category".into());
+    }
+    let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+    let is_flp = buf.len() >= 4 && &buf[0..4] == b"FLhd";
+    if is_flp {
+        run_patch_flp(&buf, &patches, out, dry_run)
+    } else {
+        run_patch_fxp(input, &buf, &patches, out, dry_run)
+    }
+}
+
+fn run_patch_fxp(
+    input: &std::path::Path,
+    buf: &[u8],
+    patches: &[fxp::PatchField],
+    out: Option<&PathBuf>,
+    dry_run: bool,
+) -> Result<(), String> {
+    // Current values for the old -> new summary (best effort).
+    let (state, _) = fxp::inflate_state(buf)
+        .map_err(|e| format!("{}: cannot read the preset state: {e}", input.display()))?;
+    let old = (
+        state_str(&state, serum::OFF_PRESET_NAME, 32),
+        state_str(&state, serum::OFF_AUTHOR, 48),
+        state_str(&state, serum::OFF_CATEGORY, 48),
+    );
+    let old_header_name = String::from_utf8_lossy(&buf[0x1C..0x38])
+        .trim_end_matches('\0')
+        .to_string();
+
+    let mut patched = buf.to_vec();
+    fxp::patch_metadata(&mut patched, patches)?;
+    println!("{}: patching {} field(s)", input.display(), patches.len());
+    for p in patches {
+        match p {
+            fxp::PatchField::Name(s) => {
+                println!("  name: '{old_header_name}' / '{}' -> '{s}'", old.0)
+            }
+            fxp::PatchField::Author(s) => println!("  author: '{}' -> '{s}'", old.1),
+            fxp::PatchField::Category(s) => println!("  category: '{}' -> '{s}'", old.2),
+        }
+    }
+
+    // Validate the result with the same rules the importer applies.
+    let report = fxp::validate_fxp(&patched);
+    if !report.is_ok() {
+        for f in report.fatals() {
+            eprintln!("  error: {f}");
+        }
+        return Err("patched file fails Serum2 validation; not written".into());
+    }
+    for w in report.warnings() {
+        println!("  note: {w}");
+    }
+    println!("  validate: PASS");
+
+    if dry_run {
+        println!("dry run: no files written");
+        return Ok(());
+    }
+    let target = out
+        .map(|p| (*p).clone())
+        .unwrap_or_else(|| input.to_path_buf());
+    write_atomic(&target, &patched)?;
+    println!(
+        "patched {} -> {} ({} bytes)",
+        input.display(),
+        target.display(),
+        patched.len()
+    );
+    Ok(())
+}
+
+fn run_patch_flp(
+    buf: &[u8],
+    patches: &[fxp::PatchField],
+    out: Option<&PathBuf>,
+    dry_run: bool,
+) -> Result<(), String> {
+    let (patched, report) = flpconv::patch_serum_metadata(buf, patches)?;
+    println!("patching {} Serum instance(s)", report.patched.len());
+    for p in &report.patched {
+        println!(
+            "  channel '{}' preset '{}' -> '{}'",
+            if p.channel_name.is_empty() {
+                "-"
+            } else {
+                &p.channel_name
+            },
+            if p.old_preset_name.is_empty() {
+                "-"
+            } else {
+                &p.old_preset_name
+            },
+            if p.new_preset_name.is_empty() {
+                "-"
+            } else {
+                &p.new_preset_name
+            },
+        );
+    }
+    for w in &report.warnings {
+        eprintln!("warning: {w}");
+    }
+    if report.patched.is_empty() {
+        return Err("no Serum instances patched".into());
+    }
+    if dry_run {
+        println!("dry run: no files written");
+        return Ok(());
+    }
+    // The patched FLP path must be given explicitly: never rewrite a project
+    // file in place by accident.
+    let Some(target) = out else {
+        return Err(
+            "patching an FLP requires --out (refusing to rewrite the project in place)".into(),
+        );
+    };
+    write_atomic(target, &patched)?;
+    println!(
+        "patched {} instance(s) -> {} ({} bytes)",
+        report.patched.len(),
+        target.display(),
+        patched.len()
+    );
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
     let result = match &cli.command {
@@ -419,6 +622,21 @@ fn main() {
             out,
             dry_run,
         } => run_convert(inputs, out.as_ref(), *dry_run),
+        Command::Patch {
+            input,
+            name,
+            author,
+            category,
+            out,
+            dry_run,
+        } => run_patch(
+            input,
+            name.as_deref(),
+            author.as_deref(),
+            category.as_deref(),
+            out.as_ref(),
+            *dry_run,
+        ),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
