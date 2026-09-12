@@ -7,9 +7,11 @@ use crate::s1state;
 use crate::s2tables::S2_PARAM_DESCS;
 use crate::s2tree::Val;
 
-/// mixOrGain1..10 (version >= 0.05).
+/// `mixOrGain1` per FX cell (bool of the mix byte at blob+0x3978+68i).
+/// Gated at version >= 0.159 in the importer (0x4E00FD); the per-FX enable
+/// knob (>= 0.05) and the gain write (unconditional) live in `mod.rs`.
 pub(super) fn write_mix_or_gain(ctx: &mut Ctx, ver: f32) {
-    if ver < 0.05 {
+    if ver < 0.159 {
         return;
     }
     for i in 0..10usize {

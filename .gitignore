@@ -43,3 +43,4 @@ target
 /tests/fixtures/golden_s2/
 /docs/data/*.json
 /tools/
+/tests/fixtures/legacy/
