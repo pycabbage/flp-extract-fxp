@@ -70,6 +70,9 @@ enum Command {
         /// Keep extracting even when a preset fails Serum2 validation.
         #[arg(long)]
         keep_invalid: bool,
+        /// Write presets whose content hash duplicates an earlier one anyway.
+        #[arg(long)]
+        keep_duplicates: bool,
         /// Also extract Serum2 instances as .SerumPreset preset files.
         #[arg(long)]
         serum2: bool,
@@ -179,21 +182,24 @@ fn run_extract(
     out_dir_opt: Option<&PathBuf>,
     overwrite: bool,
     keep_invalid: bool,
+    keep_duplicates: bool,
     serum2: bool,
     out: &Out,
 ) -> Result<ExtractReport, String> {
     let mut input_reports: Vec<ExtractInputReport> = Vec::new();
     let mut total_extracted = 0usize;
     let mut total_invalid = 0usize;
+    // content hash -> first occurrence (file, 1-based preset index), shared
+    // across the whole batch so duplicates are detected across input files.
+    let mut seen: HashMap<u64, (String, usize)> = HashMap::new();
     for input in inputs {
         let docs = read_input_docs(input)?;
         let out_dir = match out_dir_opt {
             Some(o) => o.clone(),
             None => default_out_dir(input),
         };
-        // Dedupe and unique-naming span the whole input (all members of a
-        // zipped loop package).
-        let mut seen: HashSet<u64> = HashSet::new();
+        // Unique naming spans the whole input (all members of a zipped loop
+        // package); dedupe spans the whole batch (see `seen` above).
         let mut used_names: HashMap<String, usize> = HashMap::new();
         for doc in &docs {
             let (instances, stats) = match scan_serum_instances(&doc.data) {
@@ -302,14 +308,18 @@ fn run_extract(
                     })
                 };
 
-                if !seen.insert(key) {
+                if let Some((first_file, first_idx)) = seen.get(&key) {
                     out.line(&format!(
-                        "  [{:02}] duplicate of an earlier preset, skipped (channel '{}')",
+                        "  [{:02}] duplicate of {first_file}:{first_idx:02}, skipped (channel '{}')",
                         i + 1,
                         inst.channel_name
                     ));
-                    push_entry(ExtractStatus::Duplicate, None);
-                    continue;
+                    if !keep_duplicates {
+                        push_entry(ExtractStatus::Duplicate, None);
+                        continue;
+                    }
+                } else {
+                    seen.insert(key, (doc.name.clone(), i + 1));
                 }
 
                 let file = fxp::build_fxp(&inst.chunk.chunk, &inst.chunk.meta.preset_name);
@@ -1194,6 +1204,7 @@ fn main() {
             out: out_dir,
             overwrite,
             keep_invalid,
+            keep_duplicates,
             serum2,
             ..
         } => run_extract(
@@ -1201,6 +1212,7 @@ fn main() {
             out_dir.as_ref(),
             *overwrite,
             *keep_invalid,
+            *keep_duplicates,
             *serum2,
             &out,
         )

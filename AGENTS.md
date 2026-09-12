@@ -53,6 +53,11 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
   fails still prints its full report with an embedded `"error"` field before
   exiting 1 (aborting errors print `{"error": "..."}` instead). Without
   `--json` the historical output is unchanged.
+  `extract` dedupes presets by content hash across the whole batch (all input
+  files — and, for a zipped loop package, all members — in one invocation
+  share the `seen` index); duplicates are skipped with a
+  `duplicate of <file>:<nn>` message naming the first occurrence, unless
+  `--keep-duplicates` is given.
 
 ## Frontend + wasm (`front/`)
 

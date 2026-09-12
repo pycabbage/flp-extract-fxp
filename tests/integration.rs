@@ -88,9 +88,13 @@ fn flp_varint(mut len: usize) -> Vec<u8> {
 
 /// Minimal FLP: FLhd + FLdt containing NewChan + channel name + PluginParams.
 fn synthetic_flp() -> Vec<u8> {
+    synthetic_flp_channel("Bass")
+}
+
+fn synthetic_flp_channel(channel: &str) -> Vec<u8> {
     let events: Vec<(u8, Vec<u8>)> = vec![
-        (64, vec![0, 0]),        // NewChan: channel 0
-        (203, b"Bass".to_vec()), // channel name
+        (64, vec![0, 0]),                   // NewChan: channel 0
+        (203, channel.as_bytes().to_vec()), // channel name
         (213, synthetic_plugin_params()),
     ];
 
@@ -162,6 +166,62 @@ fn validates_real_fixture() {
         .status()
         .unwrap();
     assert!(status.success(), "fixture failed validation");
+}
+
+#[test]
+fn extract_skips_cross_file_duplicates() {
+    let dir = temp_dir("dup");
+    let a = dir.join("a_project.flp");
+    let b = dir.join("b_project.flp");
+    std::fs::write(&a, synthetic_flp_channel("Bass")).unwrap();
+    std::fs::write(&b, synthetic_flp_channel("Lead")).unwrap();
+
+    let out_dir = dir.join("out");
+    let output = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_dir)
+        .arg(&a)
+        .arg(&b)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "extract failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = format!("duplicate of {}:{:02}", a.display(), 1);
+    assert!(stdout.contains(&expected), "{stdout}");
+
+    let written = std::fs::read_dir(&out_dir).unwrap().count();
+    assert_eq!(written, 1, "duplicate must not be written");
+}
+
+#[test]
+fn extract_keep_duplicates_writes_both() {
+    let dir = temp_dir("keepdup");
+    let a = dir.join("a_project.flp");
+    let b = dir.join("b_project.flp");
+    std::fs::write(&a, synthetic_flp_channel("Bass")).unwrap();
+    std::fs::write(&b, synthetic_flp_channel("Lead")).unwrap();
+
+    let output = Command::new(BIN)
+        .args(["extract", "--keep-duplicates"])
+        .arg(&a)
+        .arg(&b)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "extract failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let a_fxp = dir.join("a_project_serum_fxp/01_SynthTest.fxp");
+    let b_fxp = dir.join("b_project_serum_fxp/01_SynthTest.fxp");
+    assert!(a_fxp.exists(), "expected {}", a_fxp.display());
+    assert!(b_fxp.exists(), "expected {}", b_fxp.display());
 }
 
 fn serina1_fixture() -> PathBuf {
@@ -1031,7 +1091,7 @@ fn zipped_loop_package_dedupes_across_members() {
     assert!(output.status.success(), "extract failed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("duplicate of an earlier preset"),
+        stdout.contains("duplicate of ") && stdout.contains(":01, skipped"),
         "{stdout}"
     );
     // Only one .fxp is written for the identical pair.
