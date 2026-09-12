@@ -131,7 +131,7 @@ Serum2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外で�
 
 ## 制限
 
-- **zipped loop package 非対応**: 先頭が `PK` の ZIP 梱包 FLP は読めません。中の .flp を先に展開してください
+- **zipped loop package 対応**: 先頭が `PK` の ZIP 梱包 FLP（loop package）はメモリ上で展開し、中の `*.flp` をすべて処理します（store/deflate のみ。暗号化・Zip64 は非対応、合計展開サイズ上限 256 MiB、zip-in-zip は展開しない）。実物エクスポートでの検証は未実施（合成アーカイブで検証）
 - **VST2 / VstW はベストエフォート**: VST2 ラッパー (`VstW`) 内の `CcnK` プリセットは探索して復元しますが、全レイアウトは検証していません
 - **Serum2 インスタンスは抽出しない**: 件数の報告のみ行います (Serum2 は XferJson 状態を使うため対象外)
 - **`convert` の制限**: 新形式の Serum プリセット (172,736 バイト状態) のみ変換。旧形式 (2015 年頃) のプリセットは変換せず報告、Serum FX インスタンスは対象外。詳細は [docs/flp-conversion.md](docs/flp-conversion.md)
