@@ -36,6 +36,10 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 - CLI subcommands: `list`, `extract`, `validate`, and
   `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum instances
   inside an FLP as Serum2 instances; see `docs/flp-conversion.md`).
+  `extract` dedupes presets by content hash across the whole batch (all input
+  files in one invocation share the `seen` index); duplicates are skipped with
+  a `duplicate of <file>:<nn>` message naming the first occurrence, unless
+  `--keep-duplicates` is given.
 
 ## Frontend + wasm (`front/`)
 

@@ -44,6 +44,9 @@ enum Command {
         /// Keep extracting even when a preset fails Serum2 validation.
         #[arg(long)]
         keep_invalid: bool,
+        /// Write presets whose content hash duplicates an earlier one anyway.
+        #[arg(long)]
+        keep_duplicates: bool,
     },
     /// Check .fxp files against Serum2's Serum import rules.
     Validate { inputs: Vec<PathBuf> },
@@ -65,9 +68,13 @@ fn run_extract(
     out: Option<&PathBuf>,
     overwrite: bool,
     keep_invalid: bool,
+    keep_duplicates: bool,
 ) -> Result<(), String> {
     let mut total_extracted = 0usize;
     let mut total_invalid = 0usize;
+    // content hash -> first occurrence (file, 1-based preset index), shared
+    // across the whole batch so duplicates are detected across input files.
+    let mut seen: HashMap<u64, (String, usize)> = HashMap::new();
     for input in inputs {
         let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
         let (instances, stats) = scan_serum_instances(&buf)?;
@@ -97,19 +104,19 @@ fn run_extract(
                 String::new()
             }
         );
-        let mut seen: HashMap<u64, ()> = HashMap::new();
         let mut used_names: HashMap<String, usize> = HashMap::new();
         for (i, inst) in instances.iter().enumerate() {
             let key = hash_bytes(&inst.chunk.chunk);
-            if seen.contains_key(&key) {
+            if !keep_duplicates && let Some((first_file, first_idx)) = seen.get(&key) {
                 println!(
-                    "  [{:02}] duplicate of an earlier preset, skipped (channel '{}')",
+                    "  [{:02}] duplicate of {first_file}:{first_idx:02}, skipped (channel '{}')",
                     i + 1,
                     inst.channel_name
                 );
                 continue;
             }
-            seen.insert(key, ());
+            seen.entry(key)
+                .or_insert_with(|| (input.display().to_string(), i + 1));
 
             let report = fxp::validate_chunk_report(&inst.chunk.chunk);
             let file = fxp::build_fxp(&inst.chunk.chunk, &inst.chunk.meta.preset_name);
@@ -412,7 +419,14 @@ fn main() {
             out,
             overwrite,
             keep_invalid,
-        } => run_extract(inputs, out.as_ref(), *overwrite, *keep_invalid),
+            keep_duplicates,
+        } => run_extract(
+            inputs,
+            out.as_ref(),
+            *overwrite,
+            *keep_invalid,
+            *keep_duplicates,
+        ),
         Command::Validate { inputs } => run_validate(inputs),
         Command::Convert {
             inputs,

@@ -31,6 +31,7 @@ Serum インスタンスごとに、チャンネル番号/チャンネル名/プ
 flp-extract-fxp extract "path/to/project.flp"
 flp-extract-fxp extract -o out_dir --overwrite a.flp b.flp
 flp-extract-fxp extract --keep_invalid a.flp
+flp-extract-fxp extract --keep-duplicates a.flp b.flp
 ```
 
 | フラグ | 意味 |
@@ -38,8 +39,9 @@ flp-extract-fxp extract --keep_invalid a.flp
 | `-o`, `--out <DIR>` | 出力ディレクトリ。既定は `<flp名>_serum_fxp` (FLP と同じ場所) |
 | `--overwrite` | 既存出力ファイルを上書き (既定はスキップ) |
 | `--keep_invalid` | Serum2 バリデーションに失敗したプリセットも出力する (既定はスキップし、最後に終了コード 1 で報告) |
+| `--keep-duplicates` | content-hash が重複したプリセットも出力する (既定はスキップ) |
 
-同一チャンクの重複プリセットは自動的にスキップします。抽出結果にはプリセット名/作者/カテゴリ/バージョンと埋め込みウェーブテーブルのサイズが出力されます。
+同一チャンクの重複プリセットは、1 つの FLP 内だけでなく**複数 FLP をまたいで** (1 回の実行全体で共有の content-hash インデックスにより) 自動的にスキップします。スキップ時には初出位置を `duplicate of <file>:<nn>` 形式で報告します。抽出結果にはプリセット名/作者/カテゴリ/バージョンと埋め込みウェーブテーブルのサイズが出力されます。
 
 ### `validate` — fxp の検証
 
