@@ -61,7 +61,8 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 
 ## Frontend + wasm (`front/`)
 
-- **Critical, non-obvious**: `front/package.json` depends on
+- **Critical, non-obvious**: `front/src/lib/wasm.ts` imports the
+  `flp-extract-fxp` package; `front/package.json` depends on
   `"flp-extract-fxp": "link:../pkg"`, i.e. the generated wasm package at the
   **repo-root `pkg/` directory** (gitignored, not checked in). It must be
   generated with `wasm-pack` before `pnpm dev`/`pnpm build` will even

@@ -121,8 +121,31 @@ when one can be produced.
 |---|---|---|
 | CLI | `flp-extract-fxp convert <input.flp|input.zip> [--out <path>] [--dry-run] [--json]` | default output `<input>_serum2.flp` next to the input, or `<input>_<member>_serum2.flp` per archive member (`--out` accepted for a single-document input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance; `--json` prints a structured `ConvertReport` (camelCase keys aligned with the wasm report) on stdout and moves progress to stderr |
 | CLI | `flp-extract-fxp convert-fxp <inputs.fxp...> [--out <dir>] [--overwrite]` | standalone-preset variant (see §convert-fxp below); default output `<stem>.SerumPreset` next to each input; a failing input aborts with an error |
-| wasm | `convert_flp(data) -> ConvertReport` (`converted_count`, `doc_count`/`doc_name_at`/`flp_at`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
-| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` (a multi-member zip input downloads `<name>-serum2.zip` with one converted .flp per member) |
+| wasm | `convert_flp(data)` / `convert_flp_selected(data, indices)` -> `ConvertReport` (`converted_count`, `doc_count`/`doc_name_at`/`flp_at`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
+| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` (a multi-member zip input downloads `<name>-serum2.zip` with one converted .flp per member); with preset-table rows selected, only those instances are converted (no selection = all; selection is a plain-FLP feature, see below) |
+
+### Per-instance selection (subset conversion)
+
+`convert_flp_selected(data, indices)` converts only the selected Serum synth
+instances. `indices` are scan-order instance indices — the same numbers the
+web UI's preset table shows (`WasmPreset::index`), **not** plan positions:
+Serum FX rows exist in the table but are never planned, so plan index ≠ row
+index in general. Every planned instance therefore carries its table row in
+`flpconv::InstancePlan::instance_index` (`None` when the preset chunk could
+not be recovered and the core scan produced no row); 
+`flpconv::filter_plans_by_rows` maps a selection to plan positions and
+collects the per-instance warnings. Rules:
+
+- an empty selection converts everything (`convert_flp` behavior);
+- unselected instances stay byte-identical (`apply` only rewrites planned
+  instances) and each one is reported in `warnings_json`;
+- a selected index with no convertible Serum synth behind it (a Serum FX
+  row, an out-of-range index) is reported in `warnings_json` and skipped;
+- selection is a **plain-`.flp` feature**: for a zipped loop package the
+  table's row numbers are global across members while plans are per
+  document, so a selection cannot be mapped unambiguously —
+  `convert_flp_selected` rejects archive inputs and the archive is always
+  converted whole.
 
 ## Serum2 preset extraction (`extract --serum2`)
 
@@ -168,7 +191,6 @@ Verification status — honest:
   where they vary per file. Treat the output as structurally valid until a
   manual load check is done.
 
-
 ## Verification (real Serum2.vst3 2.0.23)
 
 - **Byte-identity vs the real importer**: golden converted states for the 5
@@ -198,7 +220,9 @@ Verification status — honest:
   `convert_writes_output`, `converted_flp_scans_clean` (the converted file
   scans as 6 Serum2 instances: 5 converted + the pre-existing one),
   `converted_flp_diff_is_localized` (the diff is limited to the Serum
-  instances' event-213 payloads).
+  instances' event-213 payloads), and the `subset_convert_*` tests (a
+  row-subset conversion leaves every unselected event-213 payload
+  byte-identical and the remaining Serum instances untouched).
 - **Browser flow** verified end-to-end (scan → convert → download).
 
 ## Limitations
@@ -228,7 +252,6 @@ warnings/output):
   version floats: 0.1470 and 0.1531 (the two legacy layouts 21,808 B /
   28,232 B); other legacy versions convert through the same migrations but
   are not golden-verified.
-
 - **(b) Serum FX instances are not converted** — there is no calibrated
   Serum2-FX FLP template. They are left untouched and reported (warning +
   skipped).
@@ -244,7 +267,6 @@ warnings/output):
   (`embeddedWTData`/`embeddedNoiseData`), exactly like the real importer — no
   external files are needed, and nothing is written next to the FLP.
 - **(e) Controller template is 2.0.22-era**: the controller record template
-
   (`docs/data/serum2_controller_record.bin`, lifted from the genuine Serum2
   instance in the calibration project) gets its JSON header patched per preset
   (preset name/author/description), but its `productVersion` strings remain

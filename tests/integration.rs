@@ -8,11 +8,15 @@
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use flp_extract_fxp::{
-    core::scan_serum_instances, flpconv::scan_convertible_detailed, s2tree, serum2state,
+use flp_extract_fxp::core::scan_serum_instances;
+use flp_extract_fxp::flp;
+use flp_extract_fxp::flpconv::{
+    BundleSource, InstancePlan, RealSource, filter_plans_by_rows, scan_convertible_detailed,
 };
+use flp_extract_fxp::{s2tree, serum2state};
 use md5::{Digest, Md5};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,16 +57,38 @@ fn synthetic_vst3_wrapper_state() -> Vec<u8> {
     state
 }
 
-/// PluginParams (event 213) payload: version + chunk id/size records.
+/// PluginParams (event 213) payload: version + chunk id/size records,
+/// including every cid `apply` needs to rebuild a Serum2 wrapper.
 fn synthetic_plugin_params() -> Vec<u8> {
     let state = synthetic_vst3_wrapper_state();
+    let cid1: [u8; 20] = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x0C, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let cid2: [u8; 25] = [
+        0, 0xA0, 0, 0, 0, 0x19, 0, 0, 0, 0x8D, 0x7D, 0x20, 0xA4, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let serum_uid: [u8; 16] = [
+        0x58, 0x54, 0x53, 0x56, 0x73, 0x66, 0x73, 0x58, 0x65, 0x72, 0x75, 0x6D, 0, 0, 0, 0,
+    ];
     let mut data = Vec::new();
     data.extend_from_slice(&12u32.to_le_bytes());
-    for (cid, payload) in [
-        (54u32, b"Serum".to_vec()),
-        (55u32, b"Serum.vst3".to_vec()),
-        (53u32, state),
-    ] {
+    let records: Vec<(u32, Vec<u8>)> = vec![
+        (1, cid1.to_vec()),
+        (2, cid2.to_vec()),
+        (30, vec![0; 16]),
+        (32, vec![0; 12]),
+        (50, {
+            let mut v = vec![0x08u8, 0, 0, 0];
+            v.extend_from_slice(&[0; 12]);
+            v
+        }),
+        (52, serum_uid.to_vec()),
+        (54, b"Serum".to_vec()),
+        (55, b"Serum.vst3".to_vec()),
+        (56, b"Xfer Records".to_vec()),
+        (53, state),
+    ];
+    for (cid, payload) in records {
         data.extend_from_slice(&cid.to_le_bytes());
         data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
@@ -83,6 +109,26 @@ fn flp_varint(mut len: usize) -> Vec<u8> {
         }
         out.push(b | 0x80);
     }
+    out
+}
+
+/// Minimal FLP: FLhd + FLdt containing the given `(id, data)` events.
+fn encode_flp(events: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    let mut dt = Vec::new();
+    for (id, data) in events {
+        dt.push(*id);
+        if *id >= 192 {
+            dt.extend_from_slice(&flp_varint(data.len()));
+        }
+        dt.extend_from_slice(data);
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"FLhd");
+    out.extend_from_slice(&6u32.to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0x46, 0, 0x60, 0]);
+    out.extend_from_slice(b"FLdt");
+    out.extend_from_slice(&(dt.len() as u32).to_le_bytes());
+    out.extend_from_slice(&dt);
     out
 }
 
@@ -1190,6 +1236,93 @@ fn convert_rejects_out_for_multi_member_zip() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--out cannot be used"), "{stderr}");
+}
+
+/// Apply the same plan-narrowing pipeline the wasm `convert_flp_selected`
+/// uses: rows -> `filter_plans_by_rows` -> bundles -> `apply`.
+fn convert_selected(
+    orig: &[u8],
+    rows: &[u32],
+) -> (Vec<u8>, flp_extract_fxp::flpconv::FlpConversionReport) {
+    let (plans, _) = scan_convertible_detailed(orig).unwrap();
+    let (positions, _) = filter_plans_by_rows(&plans, rows);
+    let kept: Vec<InstancePlan> = positions.iter().map(|&i| plans[i].clone()).collect();
+    let mut source = RealSource::embedded();
+    let bundles: Vec<Option<flp_extract_fxp::flpconv::Serum2Bundle>> = kept
+        .iter()
+        .map(|p| source.bundle_for(p, &[]).unwrap())
+        .collect();
+    flp_extract_fxp::flpconv::apply(orig, &kept, &bundles).unwrap()
+}
+
+#[test]
+fn subset_convert_leaves_unselected_byte_identical() {
+    // Two synthetic Serum instances on separate channels; convert only the
+    // second one (row 1). Runs without any fixture.
+    let params = synthetic_plugin_params();
+    let orig = encode_flp(&[
+        (64, vec![0, 0]),
+        (203, b"Bass".to_vec()),
+        (213, params.clone()),
+        (64, vec![1, 0]),
+        (203, b"Lead".to_vec()),
+        (213, params),
+    ]);
+    let (plans, _) = scan_convertible_detailed(&orig).unwrap();
+    assert_eq!(plans.len(), 2);
+    assert_eq!(plans[0].instance_index, Some(0));
+    assert_eq!(plans[1].instance_index, Some(1));
+
+    let (out, report) = convert_selected(&orig, &[1]);
+    assert_eq!(report.converted.len(), 1);
+    assert_eq!(report.converted[0].channel_name, "Lead");
+
+    let orig_events = flp::parse_events(&orig).unwrap();
+    let out_events = flp::parse_events(&out).unwrap();
+    assert_eq!(orig_events.len(), out_events.len());
+    for (i, (a, b)) in orig_events.iter().zip(&out_events).enumerate() {
+        if i == 5 {
+            assert_ne!(a.data, b.data, "the selected instance must be rewritten");
+        } else {
+            assert_eq!(a.data, b.data, "event {i} must stay byte-identical");
+        }
+    }
+}
+
+#[test]
+fn subset_convert_real_fixture_leaves_unselected_identical() {
+    if !have_serina1() {
+        return;
+    }
+    let orig = std::fs::read(serina1_fixture()).unwrap();
+    let (plans, _) = scan_convertible_detailed(&orig).unwrap();
+    assert_eq!(plans.len(), 5);
+
+    // Convert rows 1 and 3 only; rows 0, 2, 4 must stay byte-identical.
+    let (positions, warnings) = filter_plans_by_rows(&plans, &[1, 3]);
+    assert_eq!(positions, vec![1, 3]);
+    assert_eq!(warnings.len(), 3);
+
+    let (out, report) = convert_selected(&orig, &[1, 3]);
+    assert_eq!(report.converted.len(), 2);
+
+    let orig_events = flp::parse_events(&orig).unwrap();
+    let out_events = flp::parse_events(&out).unwrap();
+    assert_eq!(orig_events.len(), out_events.len());
+    let rewritten: HashSet<usize> = positions.iter().map(|&p| plans[p].event_index).collect();
+    for (i, (a, b)) in orig_events.iter().zip(&out_events).enumerate() {
+        if rewritten.contains(&i) {
+            assert_ne!(a.data, b.data, "event {i} must be rewritten");
+        } else {
+            assert_eq!(a.data, b.data, "event {i} must stay byte-identical");
+        }
+    }
+
+    // The converted file scans as 3 Serum (untouched) + 3 Serum2
+    // (2 converted + the 1 pre-existing instance).
+    let (instances, stats) = scan_serum_instances(&out).unwrap();
+    assert_eq!(instances.len(), 3);
+    assert_eq!(stats.serum2_count, 3);
 }
 
 fn serum_preset_files(dir: &Path) -> Vec<PathBuf> {
