@@ -75,18 +75,30 @@ export type ConvertDetail = {
   readonly notes: string[]
 }
 
+export type ConvertedDoc = {
+  readonly name: string
+  readonly data: Uint8Array
+}
+
 export type ConvertOutcome = {
   readonly convertedCount: number
   readonly flp: Uint8Array
+  readonly docs: ConvertedDoc[]
   readonly warnings: string[]
   readonly details: ConvertDetail[]
 }
 
 export function convert(data: Uint8Array): ConvertOutcome {
   const report = convert_flp(data)
+  const indexes = Array.from({ length: report.doc_count }, (_, index) => index)
+  const docs: ConvertedDoc[] = indexes.map((index) => ({
+    name: report.doc_name_at(index),
+    data: report.flp_at(index),
+  }))
   const outcome = {
     convertedCount: report.converted_count,
     flp: report.flp(),
+    docs,
     warnings: safeJsonArray(report.warnings_json),
     details: safeDetailArray(report.details_json),
   }
