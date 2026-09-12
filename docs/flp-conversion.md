@@ -37,7 +37,7 @@ FLP file
   → canonical CBOR body                               src/s2tree.rs
   → XferJson processor record                         src/serum2state.rs
         fresh JSON header (productVersion 2.0.23, version 9.0)
-        + md5(frame) + one raw-block zstd frame
+        + md5(frame) + one libzstd level-3 zstd frame
   → XferJson controller record                        src/flpconv.rs
         template docs/data/serum2_controller_record.bin,
         JSON header patched with presetName/presetAuthor/presetDescription
@@ -110,9 +110,10 @@ authoritative description if regeneration is ever needed.
   at `base+0x4DABC0` with derived args). Unit tests
   `golden_byte_identical_01..05` (`src/importer.rs`) require the Rust
   converter's CBOR bodies to equal them; the fixtures are untracked (see
-  above) and the tests skip when they are absent. The zstd frame differs only
-  in compression level (we emit raw-block frames; the goldens used libzstd
-  level 3) — both are standard frames, and both are accepted by the plugin.
+  above) and the tests skip when they are absent. The tests compare decoded
+  CBOR, not frame bytes: compressed frames are not guaranteed byte-identical
+  across libzstd builds, so the `hash` md5 may differ (though in practice our
+  libzstd level-3 frames came out identical to the goldens).
 - **Dynamic acceptance**: the 5 converted cid-3 processor states inside a
   converted real FLP (`tests/fixtures/serina1.flp`) were fed via `setState` to
   fresh real Serum2 instances: all returned kResultOk (0), all post-load
@@ -150,9 +151,15 @@ warnings/output):
   wavetable/noise data via embedded CBOR byte strings
   (`embeddedWTData`/`embeddedNoiseData`), exactly like the real importer — no
   external files are needed, and nothing is written next to the FLP.
-- **(e) Raw-block zstd frames** (uncompressed) grow the FLP by ~0.4 MB per
-  converted instance compared to Serum2's own compressed frames. The plugin
-  accepts them; smaller frames are a future optimization.
+- **(e) RESOLVED — real zstd compression**: converted processor states are
+  wrapped in genuine libzstd level-3 frames (previously raw-block
+  uncompressed frames, which grew the FLP by ~0.4 MB per instance). The
+  sample project's conversion dropped from 1,823,828 B to 1,238,720 B
+  (−585,108 B, −32%), i.e. roughly the same size as the source project. The
+  plugin accepts standard frames (verified dynamically, see above). Note the
+  native and wasm builds both compile libzstd from C source, so the wasm
+  build needs clang (CI installs it; locally `wasm32-unknown-unknown` checks
+  need clang on PATH).
 - **(f) Controller template is 2.0.22-era**: the controller record template
   (`docs/data/serum2_controller_record.bin`, lifted from the genuine Serum2
   instance in the calibration project) gets its JSON header patched per preset
