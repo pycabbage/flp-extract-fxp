@@ -16,8 +16,9 @@ export function UploadCard(props: {
       <CardHeader>
         <CardTitle>Load project files</CardTitle>
         <CardDescription>
-          Drop .flp files or a .zip archive below, or pick them from disk. Each project gets its own
-          preset list; the scan looks for Serum plugin instances and extracts their preset state.
+          Drop .flp files or zipped loop packages (.zip) below, or pick them from disk. Each project
+          gets its own preset list; the scan looks for Serum plugin instances and extracts their
+          preset state.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -60,7 +61,7 @@ export function UploadCard(props: {
                   Drag &amp; drop .flp files or a .zip archive here
                 </p>
                 <p className="text-muted-foreground text-xs">
-                  or click to browse — files are processed locally
+                  or click to browse ? files are processed locally
                 </p>
               </div>
               <Button

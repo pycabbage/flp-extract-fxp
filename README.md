@@ -6,6 +6,8 @@ FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum
 - Serum2 の Serum インポートチェック (静的逆解析、下記参照) を満たす fxp を生成
 - 書き出し前にバリデーションし、Serum2 が拒否するファイルは既定で出力しない
 - `convert`: FLP 内の Serum インスタンスを変換済み Serum2 インスタンスに書き換えた FLP を生成 (下記参照)
+- `convert-fxp`: 単体の Serum .fxp プリセットを Serum2 の .SerumPreset ファイルへ変換 (実験的、下記参照)
+- `patch`: fxp (または FLP 内の全 Serum インスタンス) のプリセット名 / 作者 / カテゴリを書き換え (下記参照)
 
 ## ビルド
 
@@ -13,7 +15,7 @@ FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum
 cargo build --release
 ```
 
-実行ファイル: `target/release/flp-extract-fxp` (Windows では `.exe`)。依存は clap 4、flate2、md-5。
+実行ファイル: `target/release/flp-extract-fxp` (Windows では `.exe`)。依存は clap 4、flate2、md-5、zstd (Serum2 zstd フレーム)、serde/serde_json (`--json` レポート)。
 
 ## 使い方
 
@@ -31,6 +33,7 @@ Serum インスタンスごとに、チャンネル番号/チャンネル名/プ
 flp-extract-fxp extract "path/to/project.flp"
 flp-extract-fxp extract -o out_dir --overwrite a.flp b.flp
 flp-extract-fxp extract --keep_invalid a.flp
+flp-extract-fxp extract --keep-duplicates a.flp b.flp
 ```
 
 | フラグ | 意味 |
@@ -38,8 +41,11 @@ flp-extract-fxp extract --keep_invalid a.flp
 | `-o`, `--out <DIR>` | 出力ディレクトリ。既定は `<flp名>_serum_fxp` (FLP と同じ場所) |
 | `--overwrite` | 既存出力ファイルを上書き (既定はスキップ) |
 | `--keep_invalid` | Serum2 バリデーションに失敗したプリセットも出力する (既定はスキップし、最後に終了コード 1 で報告) |
+| `--keep-duplicates` | content-hash が重複したプリセットも出力する (既定はスキップ) |
 
-同一チャンクの重複プリセットは自動的にスキップします。抽出結果にはプリセット名/作者/カテゴリ/バージョンと埋め込みウェーブテーブルのサイズが出力されます。
+同一チャンクの重複プリセットは、1 つの FLP 内だけでなく**複数 FLP をまたいで** (1 回の実行全体で共有の content-hash インデックスにより; ZIP 連結 FLP のメンバー間も含む) 自動的にスキップします。スキップ時には初出位置を `duplicate of <file>:<nn>` 形式で報告します。抽出結果にはプリセット名/作者/カテゴリ/バージョンと埋め込みウェーブテーブルのサイズが出力されます。
+
+すべてのサブコマンドは `--json` に対応し、stdout に構造化レポート (src/report.rs の camelCase JSON) を 1 件だけ出力し、進行状況は stderr に移ります。`--json` を付けない場合、従来の人間向け出力は変わりません。
 
 ### `validate` — fxp の検証
 
@@ -65,6 +71,38 @@ flp-extract-fxp convert --dry-run a.flp
 FLP 内の Serum (シンセ) インスタンスごとにプリセット状態を Serum2 形式へ完全変換し、プラグインスロットを Serum2 に書き換えます。変換後の FLP を FL Studio で開くと Serum2 が既に読み込まれた状態になり、手作業のプラグイン差し替え + fxp インポートが不要になります。ウェーブテーブルデータは変換後の状態に埋め込まれるため、追加ファイルは不要です。
 
 再生には実際の Serum2 (VST3) のインストールが必要です。Web UI にも同じ変換があり、「Convert to Serum2」ボタンでブラウザ内で変換し `<名前>-serum2.flp` としてダウンロードできます。パイプラインと検証方法の詳細は [docs/flp-conversion.md](docs/flp-conversion.md) を参照してください。
+
+`extract` / `convert` は ZIP 連結 FLP (先頭が `PK` の "zipped loop package") も受け付けます。中の `*.flp` メンバーごとに 1 ドキュメントとして処理し、`convert` はメンバーごとに `<入力名>_<メンバー名>_serum2.flp` を出力します (`--out` は単一ドキュメント入力のときのみ指定可)。
+
+### `convert-fxp` — 単体 fxp を .SerumPreset へ変換 (実験的)
+
+```sh
+flp-extract-fxp convert-fxp preset.fxp
+flp-extract-fxp convert-fxp --out out_dir --overwrite *.fxp
+```
+
+| フラグ | 意味 |
+|---|---|
+| `-o`, `--out <DIR>` | 出力ディレクトリ。既定は入力と同じ場所 |
+| `--overwrite` | 既存出力ファイルを上書き (既定はスキップ) |
+
+単体の Serum .fxp を Serum2 のネイティブな `.SerumPreset` (`<stem>.SerumPreset`) に変換します。1 つでも失敗するとエラーで中止します。
+
+### `patch` — プリセットメタデータの書き換え
+
+```sh
+flp-extract-fxp patch --name "New Name" preset.fxp
+flp-extract-fxp patch --author "Me" --category "Bass" project.flp
+flp-extract-fxp patch --dry-run --name "X" preset.fxp
+```
+
+| フラグ | 意味 |
+|---|---|
+| `--name` / `--author` / `--category` | 書き換えるフィールド (最低 1 つ必須) |
+| `-o`, `--out <FILE>` | 出力パス。既定は入力を上書き |
+| `--dry-run` | 変更を表示するだけで書き込まない |
+
+fxp (または FLP 内の全 Serum インスタンス) のプリセット名 / 作者 / カテゴリを書き換えます。名前は prgName@0x1C と状態@0x4972 の両方に書き込まれます。
 
 ### Web UI — ブラウザで抽出
 
@@ -131,7 +169,7 @@ Serum2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外で�
 
 ## 制限
 
-- **zipped loop package 非対応**: 先頭が `PK` の ZIP 梱包 FLP は読めません。中の .flp を先に展開してください
+- **zipped loop package**: 先頭が `PK` の ZIP 梱包 FLP はメモリ上で展開され、`*.flp` メンバーごとに処理されます (暗号化 / Zip64 アーカイブは拒否)。実物の FL Studio エクスポートでの検証は未実施です
 - **VST2 / VstW はベストエフォート**: VST2 ラッパー (`VstW`) 内の `CcnK` プリセットは探索して復元しますが、全レイアウトは検証していません
 - **Serum2 インスタンスは抽出しない**: 件数の報告のみ行います (Serum2 は XferJson 状態を使うため対象外)
 - **`convert` の制限**: 新形式の Serum プリセット (172,736 バイト状態) のみ変換。旧形式 (2015 年頃) のプリセットは変換せず報告、Serum FX インスタンスは対象外。詳細は [docs/flp-conversion.md](docs/flp-conversion.md)

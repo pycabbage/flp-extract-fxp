@@ -1,6 +1,6 @@
 import { zipSync } from "fflate"
 
-import { type Preset } from "./wasm"
+import { type ConvertedDoc, type ConvertOutcome, type Preset } from "./wasm"
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -30,6 +30,43 @@ export function baseName(fileName: string, fallback: string): string {
 
 export function convertedFlpFilename(fileName: string): string {
   return `${baseName(fileName, "project")}-serum2.flp`
+}
+
+export function convertedZipFilename(fileName: string): string {
+  const base = fileName.replace(/\.[^.]+$/, "") || "project"
+  return `${base}-serum2.zip`
+}
+
+function uniqueName(base: string, taken: Set<string>, total: number): string {
+  const dot = base.lastIndexOf(".")
+  const stem = dot > 0 ? base.slice(0, dot) : base
+  const ext = dot > 0 ? base.slice(dot) : ""
+  const candidates = Array.from({ length: total + 1 }, (_, index) =>
+    index === 0 ? base : `${stem}-${index + 1}${ext}`
+  )
+  return candidates.find((candidate) => !taken.has(candidate)) ?? `${stem}-extra${ext}`
+}
+
+export function buildConvertedZip(docs: ConvertedDoc[]): Uint8Array {
+  const names = new Map<string, string>()
+  const entries: Record<string, Uint8Array> = {}
+  for (const doc of docs) {
+    const name = names.has(doc.name)
+      ? uniqueName(doc.name, new Set(names.values()), docs.length)
+      : doc.name
+    names.set(doc.name, name)
+    entries[name] = doc.data
+  }
+  return zipSync(entries)
+}
+
+export function downloadConverted(fileName: string, outcome: ConvertOutcome): void {
+  if (outcome.docs.length > 1) {
+    const zip = buildConvertedZip(outcome.docs)
+    downloadBlob(zip, convertedZipFilename(fileName))
+    return
+  }
+  downloadBlob(outcome.flp, convertedFlpFilename(fileName))
 }
 
 export function downloadBlob(bytes: Uint8Array, filename: string): void {
