@@ -25,26 +25,22 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
   spawns the actual compiled binary via `CARGO_BIN_EXE_flp-extract-fxp`
   (cargo builds it automatically first; no separate build step needed).
 - Edition 2024 (Cargo.toml) → requires a recent stable Rust toolchain
-  (1.85+). No `rustfmt.toml`/`clippy.toml` in the repo; there's also no CI
-  job running `cargo test`/`clippy`/`fmt` (the only workflow is
-  `.github/workflows/pages.yml`, which just builds the wasm+frontend and
-  deploys). Run `cargo test` yourself before considering work done.
-- Only dependencies are `clap`, `flate2`, `md-5`, `serde` and `serde_json`
-  (native; the last two power the `--json` CLI reports and are
-  wasm32-safe); `wasm-bindgen` is a target-specific dep for
-  `wasm32-unknown-unknown` only, `ruzstd` is a dev-dependency (test-only
-  zstd decoding). Keep new dependencies wasm32-safe — the conversion stack
-  must compile identically for both targets.
+  (1.85+). Workflows: `.github/workflows/pages.yml` (builds the wasm +
+  frontend and deploys to Pages), `.github/workflows/rust.yml` (cargo
+  fmt/clippy/test), and `.github/workflows/release.yml` (on `v*` tag
+  pushes matrix-builds the CLI for win64 / linux64 / macOS x64+arm64,
+  packages binary + README.md as `flp-extract-fxp-{version}-{target}.zip`
+  and attaches them to a GitHub Release with generated notes — wasm is
+  NOT distributed, the web UI ships via Pages). Run `cargo test` yourself
+  before considering work done.
+- Only dependencies are `clap`, `flate2`, `md-5`, `zstd`, `serde` and `serde_json` (the last two power the `--json` CLI reports; all wasm32-safe);
+  `wasm-bindgen` is a target-specific dep for `wasm32-unknown-unknown` only,
+  `ruzstd` is a dev-dependency (test-only zstd decoding). Keep new
+  dependencies wasm32-safe
+  — the conversion stack must compile identically for both targets.
 - CLI subcommands: `list`, `extract`, `validate`, and
   `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum instances
-  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`). Every
-  subcommand takes `--json`: stdout then carries exactly one JSON document
-  (the structured report from `src/report.rs`, camelCase keys aligned with
-  the wasm report fields), human-readable progress moves to stderr, and a
-  command that completes but fails still prints its full report with an
-  embedded `"error"` field before exiting 1 (aborting errors print
-  `{"error": "..."}` instead). Without `--json` the historical output is
-  unchanged.
+  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`).
 
 ## Frontend + wasm (`front/`)
 
@@ -113,9 +109,10 @@ docs above):
 - `src/importer.rs` correctness is proven by **byte-identity tests** against
   golden states produced by the REAL importer (called at runtime). Do not
   "simplify" importer logic without re-running those tests.
-- Converted processor states use **raw-block zstd frames** (uncompressed) on
-  purpose — plugin-accepted; the goldens use libzstd level 3, both are
-  standard frames. Smaller frames are future work, not a bug to fix.
+- Converted processor states use **libzstd level-3 zstd frames** (`zstd`
+  crate, `s2tree::zstd_frame`) — plugin-accepted (dynamically verified).
+  libzstd compiles C code, so the wasm32 build needs clang (CI installs it in
+  `pages.yml`; locally put `C:\Program Files\LLVM\bin` on PATH).
 
 ## Tests
 

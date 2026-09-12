@@ -21,6 +21,7 @@ md-5 = "0.10"
 # the shared report types (src/report.rs) stay available on every target.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+zstd = "0.13"
 
 # WebAssembly bindings. Target-specific dependency, so native CLI builds
 # never fetch or link wasm-bindgen; src/web.rs is cfg-gated identically.

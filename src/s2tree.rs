@@ -1,5 +1,5 @@
 //! Serum2 state body tree: a deterministic CBOR (RFC 8949 subset) value tree
-//! with encode/decode plus raw zstd frame assembly, matching the canonical
+//! with encode/decode plus zstd frame compression, matching the canonical
 //! Python reference encoder byte-for-byte (validated against 460+ KB of
 //! plugin-produced bodies; see `docs/serum2-state-format.md` and
 //! `docs/flp-conversion.md`).
@@ -406,36 +406,12 @@ pub fn decode_cbor(data: &[u8]) -> Result<Val, String> {
     Ok(v)
 }
 
-/// Build a zstd frame with Raw blocks only: single-segment frame with a
-/// 4-byte frame-content-size header and no window descriptor, no checksum,
-/// no dictionary. Decompressible by any standard zstd decoder.
-pub fn zstd_raw_frame(data: &[u8]) -> Vec<u8> {
-    const MAX_BLOCK: usize = 131_072;
-    let n_blocks = if data.is_empty() {
-        1
-    } else {
-        data.len().div_ceil(MAX_BLOCK)
-    };
-    let mut out = Vec::with_capacity(8 + data.len() + 3 * n_blocks);
-    out.extend_from_slice(&[0x28, 0xB5, 0x2F, 0xFD]);
-    // FHD: Frame_Content_Size_flag = 2 (4-byte FCS), Single_Segment_flag = 1.
-    out.push(0xA0);
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    if data.is_empty() {
-        // One empty Raw block, last: (0 << 3) | 1.
-        out.extend_from_slice(&[0x01, 0x00, 0x00]);
-        return out;
-    }
-    let mut off = 0usize;
-    while off < data.len() {
-        let end = (off + MAX_BLOCK).min(data.len());
-        let n = (end - off) as u32;
-        let hdr = (n << 3) | u32::from(end == data.len());
-        out.extend_from_slice(&hdr.to_le_bytes()[..3]);
-        out.extend_from_slice(&data[off..end]);
-        off = end;
-    }
-    out
+/// Compress `data` into a single standard zstd frame (libzstd level 3 via
+/// `zstd::bulk::compress`). The frame declares its content size in the
+/// header and decompresses with any standard zstd decoder, including
+/// Serum2's importer.
+pub fn zstd_frame(data: &[u8]) -> Vec<u8> {
+    zstd::bulk::compress(data, 3).expect("zstd compression of in-memory data cannot fail")
 }
 
 /// Parse a zstd frame header and return the declared frame content size.
@@ -463,13 +439,16 @@ pub fn zstd_frame_body_len(frame: &[u8]) -> Option<usize> {
     }
     p += dict_bytes;
     match fcs_flag {
+        // Flag 0 + single segment: raw 1-byte size (libzstd uses this for
+        // content <= 255 B; no offset — see ZSTD_getFrameHeader, fcsId 0).
         0 => {
             if single_segment && frame.len() > p {
-                Some(frame[p] as usize + 1)
+                Some(frame[p] as usize)
             } else {
                 None
             }
         }
+        // Flag 1: 2-byte field, +256 offset.
         1 => {
             if frame.len() < p + 2 {
                 return None;
@@ -610,25 +589,27 @@ mod tests {
 
     #[test]
     fn zstd_frames_round_trip_via_ruzstd() {
-        // Real init body (6460 B -> 1 frame, single raw block).
-        let frame = zstd_raw_frame(crate::s2tables::INIT_BODY);
+        // Real init body (6460 B) -> one standard frame with a declared FCS.
+        let frame = zstd_frame(crate::s2tables::INIT_BODY);
+        assert!(frame.starts_with(&[0x28, 0xB5, 0x2F, 0xFD]), "magic");
+        assert!(frame.len() < crate::s2tables::INIT_BODY.len(), "compressed");
         assert_eq!(
             zstd_frame_body_len(&frame),
             Some(crate::s2tables::INIT_BODY.len())
         );
         assert_eq!(decode_zstd_frame(&frame), crate::s2tables::INIT_BODY);
 
-        // Synthetic 300,000-byte body -> exactly 3 raw blocks.
+        // Synthetic 300,000-byte body -> one frame, multiple blocks.
         let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
-        let frame = zstd_raw_frame(&big);
+        let frame = zstd_frame(&big);
         assert_eq!(decode_zstd_frame(&frame), big);
         assert_eq!(zstd_frame_body_len(&frame), Some(300_000));
 
         // 0-byte and 1-byte inputs.
-        let frame = zstd_raw_frame(&[]);
+        let frame = zstd_frame(&[]);
         assert_eq!(decode_zstd_frame(&frame), Vec::<u8>::new());
         assert_eq!(zstd_frame_body_len(&frame), Some(0));
-        let frame = zstd_raw_frame(b"x");
+        let frame = zstd_frame(b"x");
         assert_eq!(decode_zstd_frame(&frame), b"x".to_vec());
         assert_eq!(zstd_frame_body_len(&frame), Some(1));
     }

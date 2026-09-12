@@ -15,6 +15,10 @@ cargo build --release
 
 実行ファイル: `target/release/flp-extract-fxp` (Windows では `.exe`)。依存は clap 4、flate2、md-5、serde / serde_json (`--json` 出力用)。
 
+### ビルド済みバイナリ
+
+`v*` タグの push で GitHub Actions が Windows / Linux / macOS (x64, arm64) 向けのバイナリをビルドし、GitHub Releases に `flp-extract-fxp-{version}-{target}.zip` として添付します (wasm は配布対象外、Web 版は GitHub Pages で提供)。
+
 ## 使い方
 
 ### `list` — Serum インスタンスの一覧
