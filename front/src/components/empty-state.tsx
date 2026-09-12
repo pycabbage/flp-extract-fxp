@@ -8,7 +8,7 @@ export function EmptyState() {
       <PackageOpenIcon />
       <AlertTitle>Nothing scanned yet</AlertTitle>
       <AlertDescription>
-        Load an .flp file above to see the Serum presets it contains.
+        Load .flp files or a ZIP archive above to see the Serum presets they contain.
       </AlertDescription>
     </Alert>
   )

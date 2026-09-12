@@ -40,11 +40,12 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 ## Frontend + wasm (`front/`)
 
 - **Critical, non-obvious**: `front/src/lib/wasm.ts` imports
-  `../../pkg/flp_extract_fxp.js`. That `front/pkg/` directory is
-  **gitignored and not checked in** — it must be generated with
-  `wasm-pack` before `pnpm dev`/`pnpm build` will even typecheck:
+  `flp-extract-fxp` (resolved via `front/package.json`'s `link:../pkg`). That
+  `pkg/` directory at the **repo root** is gitignored and not checked in —
+  it must be generated with `wasm-pack` before `pnpm dev`/`pnpm build` will
+  even typecheck:
   ```sh
-  wasm-pack build --target web --out-dir front/pkg --out-name flp_extract_fxp .
+  wasm-pack build --target web --out-dir pkg --out-name flp_extract_fxp .
   ```
   Run this from the **repo root** (not `front/`), matching
   `.github/workflows/pages.yml`. Requires the `wasm32-unknown-unknown`
@@ -52,7 +53,7 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 - Package manager is **pnpm** (`front/pnpm-lock.yaml`, lockfile v9). CI uses
   `pnpm/action-setup@v4` with version `12` and Node 22.
 - From `front/`: `pnpm install`, `pnpm dev`, `pnpm build` (= `tsc -b && vite
-  build`, needs `front/pkg/` to exist first), `pnpm preview`. There is no
+  build`, needs the repo-root `pkg/` to exist first), `pnpm preview`. There is no
   separate format script — `pnpm lint` runs `oxlint --fix` and `oxfmt`
   concurrently (auto-fixing lint issues and formatting in one command; not
   eslint/prettier). Type-aware lint rules are on (`oxlint-tsgolint`, see
