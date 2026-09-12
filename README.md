@@ -14,7 +14,11 @@ FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum
 cargo build --release
 ```
 
-実行ファイル: `target/release/flp-extract-fxp` (Windows では `.exe`)。依存は clap 4、flate2、md-5。
+実行ファイル: `target/release/flp-extract-fxp` (Windows では `.exe`)。依存は clap 4、flate2、md-5、serde / serde_json (`--json` 出力用)。
+
+### ビルド済みバイナリ
+
+`v*` タグの push で GitHub Actions が Windows / Linux / macOS (x64, arm64) 向けのバイナリをビルドし、GitHub Releases に `flp-extract-fxp-{version}-{target}.zip` として添付します (wasm は配布対象外、Web 版は GitHub Pages で提供)。
 
 ## 使い方
 
@@ -85,6 +89,20 @@ flp-extract-fxp patch project.flp --name "New Name" --out renamed.flp
 | `--dry-run` | 変更内容 (旧値 → 新値) を表示して書き込まない |
 
 書き換えは状態ストリーム 0 を展開 → 対象フィールドを上書き → zlib レベル 1 (Serum 実物と同じ) で再圧縮 → トレーラ / `chunkSize` / `byteSize` を再計算、で行い、それ以外のバイトは一切変えません。長い名前は UTF-8 文字境界で切り詰めます。書き込み前に `validate` と同じ規則で結果を検査し、FAIL 時は書き込みません。名前の書き込み位置の仕様は [docs/serum-fxp-format.md](docs/serum-fxp-format.md) §4 を参照してください。FLP 入力の場合はプロジェクト内の全 Serum (シンセ) インスタンスを同じ要領で書き換えます (Serum FX は対象外、イベント 213 の cid 3 チャンクを差し替えて FLdt 長を修正)。
+### `--json` — 機械可読出力 (全サブコマンド共通)
+
+```sh
+flp-extract-fxp list --json "path/to/project.flp"
+```
+
+`list` / `extract` / `validate` / `convert` のすべてに `--json` フラグがあります。付けた場合、stdout には**単一の JSON ドキュメント** (整形出力) だけが出力され、人間可読の進行状況はすべて stderr に移ります。
+
+- JSON はコマンドごとに構造化されたレポートで、キー名は camelCase で Web 版 (wasm) のレポート項目 (`presets` / `failed` / `serum2Skipped` / `valid` / `warnings` / `errors` / `convertedCount` / `details` など) と揃えてあります。スクリプトや CI で CLI と Web 版の出力を共通して扱えます
+- コマンドが最後まで走ったが失敗で終わる場合 (例: `validate` で FAIL、`extract` で全件スキップ) でも完全なレポートを出力し、トップレベルに `"error": "..."` を付けた上で終了コード 1 で終わります
+- 中断を伴う致命的エラー (入力ファイルが読めない、FLP として解析不能など) では `{"error": "..."}` のみを stdout に出し、終了コード 1 で終わります
+
+`--json` を付けない場合の出力は従来通りです。
+
 
 ## 出力ファイル名
 
@@ -147,7 +165,7 @@ Serum2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外で�
 
 ## 制限
 
-- **zipped loop package 非対応**: 先頭が `PK` の ZIP 梱包 FLP は読めません。中の .flp を先に展開してください
+- **zipped loop package 対応**: 先頭が `PK` の ZIP 梱包 FLP（loop package）はメモリ上で展開し、中の `*.flp` をすべて処理します（store/deflate のみ。暗号化・Zip64 は非対応、合計展開サイズ上限 256 MiB、zip-in-zip は展開しない）。実物エクスポートでの検証は未実施（合成アーカイブで検証）
 - **VST2 / VstW はベストエフォート**: VST2 ラッパー (`VstW`) 内の `CcnK` プリセットは探索して復元しますが、全レイアウトは検証していません
 - **Serum2 インスタンスは抽出しない**: 件数の報告のみ行います (Serum2 は XferJson 状態を使うため対象外)
 - **`convert` の制限**: 新形式の Serum プリセット (172,736 バイト状態) のみ変換。旧形式 (2015 年頃) のプリセットは変換せず報告、Serum FX インスタンスは対象外。詳細は [docs/flp-conversion.md](docs/flp-conversion.md)
@@ -158,6 +176,6 @@ Serum2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外で�
 cargo test
 ```
 
-ユニットテスト (FLP パーサ / 状態解析 / fxp 構築・検証) に加え、合成 FLP からの `extract` → `validate` を実行する統合テスト (`tests/integration.rs`) と、実フィクスチャ fxp の検証テストを含みます。
+ユニットテスト (FLP パーサ / 状態解析 / fxp 構築・検証) に加え、合成 FLP からの `extract` → `validate` を実行する統合テスト (`tests/integration.rs`)、全サブコマンドの `--json` 出力をパースして構造を検証する統合テスト、実フィクスチャ fxp の検証テストを含みます。
 
 `convert` は 5 プリセット分の golden 変換状態 (`tests/fixtures/golden_s2/`、実インポータが生成したもの) とのバイト一致テストと、実プロジェクト (`tests/fixtures/serina1.flp`) を変換した FLP の再スキャン / 差分テストで検証します。
