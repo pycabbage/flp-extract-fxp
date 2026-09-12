@@ -199,9 +199,48 @@ fn legacy_golden_one(name: &str) {
     }
 }
 
+/// The documented legacy gap (docs/flp-conversion.md limitation (a)): for
+/// these presets the RoutingSlot4 destination the real importer applies is
+/// not recoverable from the blob. The conversion must succeed and differ
+/// from the real importer in EXACTLY that one leaf — ours `Master`, importer
+/// `Direct` — and the gap must be surfaced in the report. Any other diff
+/// fails.
+fn legacy_gap_one(name: &str) {
+    let Some((preset, tree)) = legacy_fixture(name) else {
+        eprintln!("skipping legacy preset {name}: untracked fixtures absent");
+        return;
+    };
+    let conv = convert_s1_to_s2(&preset, 0).expect("convert");
+    let want = legacy_expected_body(&tree).expect("skeleton");
+    let mut diffs = Vec::new();
+    diff_leaves(&conv.body, &want, String::new(), &mut diffs);
+    assert_eq!(
+        diffs.len(),
+        1,
+        "expected exactly the documented RoutingSlot4 gap for {name}, got: {diffs:?}"
+    );
+    let (path, ours, importer) = &diffs[0];
+    assert_eq!(
+        path, ".RoutingSlot4.plainParams.kParamRoutingDest",
+        "unexpected diff path for {name}"
+    );
+    assert_eq!(ours, r#"Text("kRoutingDestMaster")"#, "ours for {name}");
+    assert_eq!(
+        importer, r#"Text("kRoutingDestDirect")"#,
+        "importer for {name}"
+    );
+    assert!(
+        conv.report.notes.iter().any(|n| n.contains("RoutingSlot4")),
+        "expected a RoutingSlot4 note in the report for {name}, got {:?}",
+        conv.report.notes
+    );
+}
+
+/// Gap-pinned (see `legacy_gap_one`): the single RoutingSlot4 leaf differs
+/// from the real importer by design; everything else must stay identical.
 #[test]
 fn legacy_golden_fl_bass_adventure() {
-    legacy_golden_one("FL_BASS_Adventure");
+    legacy_gap_one("FL_BASS_Adventure");
 }
 #[test]
 fn legacy_golden_fl_beautybeast() {
@@ -217,7 +256,7 @@ fn legacy_golden_fl_downpour() {
 }
 #[test]
 fn legacy_golden_fl_fmitup() {
-    legacy_golden_one("FL_FMItUp");
+    legacy_gap_one("FL_FMItUp");
 }
 #[test]
 fn legacy_golden_fl_heavenly() {

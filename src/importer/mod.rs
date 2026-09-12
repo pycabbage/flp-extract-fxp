@@ -455,6 +455,21 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
         }
     }
 
+    // ---- legacy RoutingSlot4 gap note (docs/flp-conversion.md limitation
+    // (a)): for legacy presets the value the real importer applies to the
+    // FX-output routing slot is not recoverable from the blob; where the
+    // conversion resolves the slot to Master the real importer has been
+    // observed to choose Direct instead (FL_FMItUp / FL_BASS_Adventure).
+    // Surface it instead of guessing. ----
+    if ver < 0.162 && ctx.f32_at(s1state::OFF_MASTER_PARAMS + 4 * 43) < 0.25 {
+        ctx.notes.push(
+            "legacy preset: RoutingSlot4 routing destination could not be \
+             recovered (Master assumed; Serum 2's importer chooses Direct for \
+             some legacy files)"
+                .into(),
+        );
+    }
+
     // ---- S1 mod-slot staging + ModSlot node builder ----
     modmatrix::stage_mod_slots(&mut ctx, ver);
 
