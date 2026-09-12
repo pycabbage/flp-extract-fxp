@@ -13,6 +13,66 @@ use std::path::{Path, PathBuf};
 
 use crate::flp;
 use crate::serum;
+use crate::zip;
+
+/// One FLP document ready for scanning: either the raw input bytes or a
+/// single `*.flp` member unpacked in memory from a zipped loop package
+/// (see [`flp_inputs`]).
+#[derive(Debug)]
+pub struct FlpInput {
+    /// Display name: the input's own name for plain FLPs, or
+    /// `<input>#<member>` for archive members (empty input name yields just
+    /// the member name).
+    pub name: String,
+    /// FLP bytes (decompressed for archive members).
+    pub data: Vec<u8>,
+    /// True when this document was unpacked from a ZIP archive.
+    pub from_archive: bool,
+}
+
+/// Resolve raw input bytes into the FLP documents to process.
+///
+/// Plain FLP bytes yield a single document named `input_name`. A
+/// `PK`-prefixed ZIP archive (FL Studio "zipped loop package") is unpacked
+/// in memory (see [`crate::zip`]) and every `*.flp` member
+/// (case-insensitive) becomes one document. Nested archives are never
+/// unpacked: a `.flp` member that is itself a ZIP reaches the scanner and
+/// fails there with a clear error. A corrupt archive, or one without any
+/// `.flp` member, is a fatal error.
+pub fn flp_inputs(input_name: &str, buf: &[u8]) -> Result<Vec<FlpInput>, String> {
+    if !zip::is_zip(buf) {
+        return Ok(vec![FlpInput {
+            name: input_name.to_string(),
+            data: buf.to_vec(),
+            from_archive: false,
+        }]);
+    }
+    let members = zip::unzip_flp_members(buf)?;
+    if members.is_empty() {
+        return if input_name.is_empty() {
+            Err("the ZIP archive does not contain any .flp member".into())
+        } else {
+            Err(format!(
+                "'{input_name}' is a ZIP archive without any .flp member"
+            ))
+        };
+    }
+    Ok(members
+        .into_iter()
+        .map(|m| {
+            let name = if input_name.is_empty() {
+                m.name
+            } else {
+                format!("{input_name}#{}", m.name)
+            };
+            FlpInput {
+                name,
+                data: m.data,
+                from_archive: true,
+            }
+        })
+        .collect())
+}
 
 /// Diagnostics collected while scanning an FLP.
 #[derive(Debug, Default)]
@@ -41,9 +101,10 @@ pub struct Instance {
 /// Walk the events once, associating plugin params with channel / FX names.
 ///
 /// Returns the discovered instances in file order plus [`ScanStats`].
-/// Unparseable FLP data (zip archive, missing `FLhd`, truncated events, ...)
+/// Unparseable FLP data (ZIP archive, missing `FLhd`, truncated events, ...)
 /// is a fatal `Err(String)` with a human-readable message; per-instance
-/// conversion failures are only recorded in [`ScanStats::failed`].
+/// conversion failures are only recorded in [`ScanStats::failed`]. ZIP
+/// inputs must be resolved through [`flp_inputs`] first.
 pub fn scan_serum_instances(buf: &[u8]) -> Result<(Vec<Instance>, ScanStats), String> {
     let events = flp::parse_events(buf)?;
     let mut channels: HashMap<u16, String> = HashMap::new();
@@ -213,6 +274,58 @@ pub fn format_bytes(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{build_flp, zip_archive};
+
+    #[test]
+    fn plain_input_yields_single_document() {
+        let flp = build_flp(&[(9, vec![1])]);
+        let docs = flp_inputs("song.flp", &flp).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].name, "song.flp");
+        assert_eq!(docs[0].data, flp);
+        assert!(!docs[0].from_archive);
+    }
+
+    #[test]
+    fn zip_input_yields_flp_member_documents() {
+        let flp_a = build_flp(&[(9, vec![1])]);
+        let flp_b = build_flp(&[(9, vec![2])]);
+        let archive = zip_archive(
+            &[
+                ("a.flp", flp_a.clone()),
+                ("notes.txt", b"hi".to_vec()),
+                ("dir/b.FLP", flp_b.clone()),
+            ],
+            true,
+        );
+        let docs = flp_inputs("pack.zip", &archive).unwrap();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0].name, "pack.zip#a.flp");
+        assert_eq!(docs[0].data, flp_a);
+        assert_eq!(docs[1].name, "pack.zip#dir/b.FLP");
+        assert_eq!(docs[1].data, flp_b);
+        assert!(docs.iter().all(|d| d.from_archive));
+    }
+
+    #[test]
+    fn zip_without_flp_members_is_an_error() {
+        let archive = zip_archive(&[("only.txt", b"x".to_vec())], false);
+        let err = flp_inputs("pack.zip", &archive).unwrap_err();
+        assert!(err.contains("without any .flp member"), "{err}");
+    }
+
+    #[test]
+    fn nested_zip_member_is_never_recursed() {
+        // A member named *.flp that is itself a ZIP is returned as-is and
+        // must fail FLP parsing (no recursion into zip-in-zip).
+        let inner = zip_archive(&[("deep.flp", build_flp(&[(9, vec![1])]))], false);
+        let archive = zip_archive(&[("outer.flp", inner)], false);
+        let docs = flp_inputs("pack.zip", &archive).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(&docs[0].data[..2], b"PK");
+        let scan = scan_serum_instances(&docs[0].data);
+        assert!(scan.is_err());
+    }
 
     #[test]
     fn sanitizes_filenames() {

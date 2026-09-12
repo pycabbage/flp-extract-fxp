@@ -8,12 +8,12 @@
 
 use clap::{Parser, Subcommand};
 use flp_extract_fxp::core::{
-    default_out_dir, format_bytes, hash_bytes, sanitize_filename, scan_serum_instances,
+    self, default_out_dir, format_bytes, hash_bytes, sanitize_filename, scan_serum_instances,
 };
 use flp_extract_fxp::flpconv::BundleSource;
 use flp_extract_fxp::{flpconv, fxp, serum};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -60,6 +60,23 @@ enum Command {
     },
 }
 
+/// Read one input path and resolve it into the FLP documents to process:
+/// the plain FLP itself, or every `*.flp` member of a zipped loop package
+/// unpacked in memory (`core::flp_inputs`).
+fn read_input_docs(input: &Path) -> Result<Vec<core::FlpInput>, String> {
+    let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+    core::flp_inputs(&input.display().to_string(), &buf)
+}
+
+/// Print a scan warning, tagging archive members with their member name.
+fn print_warning(doc: &core::FlpInput, msg: &str) {
+    if doc.from_archive {
+        eprintln!("warning: {}: {msg}", doc.name);
+    } else {
+        eprintln!("warning: {msg}");
+    }
+}
+
 fn run_extract(
     inputs: &[PathBuf],
     out: Option<&PathBuf>,
@@ -69,126 +86,138 @@ fn run_extract(
     let mut total_extracted = 0usize;
     let mut total_invalid = 0usize;
     for input in inputs {
-        let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-        let (instances, stats) = scan_serum_instances(&buf)?;
-        for msg in &stats.failed {
-            eprintln!("warning: {msg}");
-        }
-        if instances.is_empty() {
-            eprintln!(
-                "{}: no Serum presets found ({} Serum2 instance(s) skipped)",
-                input.display(),
-                stats.serum2_count
-            );
-            continue;
-        }
+        let docs = read_input_docs(input)?;
         let out_dir = match out {
             Some(o) => o.clone(),
             None => default_out_dir(input),
         };
-        std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
-        println!(
-            "{}: {} Serum preset(s){}",
-            input.display(),
-            instances.len(),
-            if stats.serum2_count > 0 {
-                format!(", {} Serum2 instance(s) skipped", stats.serum2_count)
-            } else {
-                String::new()
-            }
-        );
+        // Dedupe and unique-naming span the whole input (all members of a
+        // zipped loop package).
         let mut seen: HashMap<u64, ()> = HashMap::new();
         let mut used_names: HashMap<String, usize> = HashMap::new();
-        for (i, inst) in instances.iter().enumerate() {
-            let key = hash_bytes(&inst.chunk.chunk);
-            if seen.contains_key(&key) {
-                println!(
-                    "  [{:02}] duplicate of an earlier preset, skipped (channel '{}')",
-                    i + 1,
-                    inst.channel_name
-                );
-                continue;
-            }
-            seen.insert(key, ());
-
-            let report = fxp::validate_chunk_report(&inst.chunk.chunk);
-            let file = fxp::build_fxp(&inst.chunk.chunk, &inst.chunk.meta.preset_name);
-
-            let base_name: String = if !inst.chunk.meta.preset_name.is_empty() {
-                inst.chunk.meta.preset_name.clone()
-            } else if !inst.channel_name.is_empty() {
-                inst.channel_name.clone()
-            } else {
-                format!("Serum {}", i + 1)
-            };
-            let base = sanitize_filename(&base_name);
-            let count = used_names.entry(base.clone()).or_insert(0);
-            *count += 1;
-            let file_name = if *count == 1 {
-                format!("{:02}_{}.fxp", i + 1, base)
-            } else {
-                format!("{:02}_{}_{}.fxp", i + 1, base, count)
-            };
-            let path = out_dir.join(&file_name);
-            if path.exists() && !overwrite {
-                eprintln!(
-                    "  [{:02}] {} exists, skipped (use --overwrite)",
-                    i + 1,
-                    path.display()
-                );
-                continue;
-            }
-            if !report.is_ok() && !keep_invalid {
-                total_invalid += 1;
-                for f in report.fatals() {
-                    eprintln!("  [{:02}] INVALID preset '{}': {}", i + 1, base, f);
+        for doc in &docs {
+            let (instances, stats) = match scan_serum_instances(&doc.data) {
+                Ok(v) => v,
+                Err(e) => {
+                    if doc.from_archive {
+                        eprintln!("warning: skipping {}: {e}", doc.name);
+                        continue;
+                    }
+                    return Err(e);
                 }
+            };
+            for msg in &stats.failed {
+                print_warning(doc, msg);
+            }
+            if instances.is_empty() {
+                eprintln!(
+                    "{}: no Serum presets found ({} Serum2 instance(s) skipped)",
+                    doc.name, stats.serum2_count
+                );
                 continue;
             }
-            std::fs::write(&path, &file).map_err(|e| format!("{}: {e}", path.display()))?;
-            total_extracted += 1;
-            let wt = if inst.chunk.stream_sizes.len() > 1 {
-                format!(
-                    ", {} embedded table(s): {}",
-                    inst.chunk.stream_sizes.len() - 1,
-                    inst.chunk.stream_sizes[1..]
-                        .iter()
-                        .map(|s| format_bytes(*s))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            } else {
-                String::new()
-            };
+            std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
             println!(
-                "  [{:02}] channel '{}' -> preset '{}' by '{}' (cat '{}', state {}, ver {:.4}{wt}) => {}",
-                i + 1,
-                if inst.channel_name.is_empty() {
-                    "-"
+                "{}: {} Serum preset(s){}",
+                doc.name,
+                instances.len(),
+                if stats.serum2_count > 0 {
+                    format!(", {} Serum2 instance(s) skipped", stats.serum2_count)
                 } else {
-                    &inst.channel_name
-                },
-                if inst.chunk.meta.preset_name.is_empty() {
-                    "-"
-                } else {
-                    &inst.chunk.meta.preset_name
-                },
-                if inst.chunk.meta.author.is_empty() {
-                    "-"
-                } else {
-                    &inst.chunk.meta.author
-                },
-                if inst.chunk.meta.category.is_empty() {
-                    "-"
-                } else {
-                    &inst.chunk.meta.category
-                },
-                format_bytes(inst.chunk.stream_sizes.first().copied().unwrap_or(0)),
-                inst.chunk.meta.version_f32,
-                path.display(),
+                    String::new()
+                }
             );
-            for w in report.warnings() {
-                println!("       note: {w}");
+            for (i, inst) in instances.iter().enumerate() {
+                let key = hash_bytes(&inst.chunk.chunk);
+                if seen.contains_key(&key) {
+                    println!(
+                        "  [{:02}] duplicate of an earlier preset, skipped (channel '{}')",
+                        i + 1,
+                        inst.channel_name
+                    );
+                    continue;
+                }
+                seen.insert(key, ());
+
+                let report = fxp::validate_chunk_report(&inst.chunk.chunk);
+                let file = fxp::build_fxp(&inst.chunk.chunk, &inst.chunk.meta.preset_name);
+
+                let base_name: String = if !inst.chunk.meta.preset_name.is_empty() {
+                    inst.chunk.meta.preset_name.clone()
+                } else if !inst.channel_name.is_empty() {
+                    inst.channel_name.clone()
+                } else {
+                    format!("Serum {}", i + 1)
+                };
+                let base = sanitize_filename(&base_name);
+                let count = used_names.entry(base.clone()).or_insert(0);
+                *count += 1;
+                let file_name = if *count == 1 {
+                    format!("{:02}_{}.fxp", i + 1, base)
+                } else {
+                    format!("{:02}_{}_{}.fxp", i + 1, base, count)
+                };
+                let path = out_dir.join(&file_name);
+                if path.exists() && !overwrite {
+                    eprintln!(
+                        "  [{:02}] {} exists, skipped (use --overwrite)",
+                        i + 1,
+                        path.display()
+                    );
+                    continue;
+                }
+                if !report.is_ok() && !keep_invalid {
+                    total_invalid += 1;
+                    for f in report.fatals() {
+                        eprintln!("  [{:02}] INVALID preset '{}': {}", i + 1, base, f);
+                    }
+                    continue;
+                }
+                std::fs::write(&path, &file).map_err(|e| format!("{}: {e}", path.display()))?;
+                total_extracted += 1;
+                let wt = if inst.chunk.stream_sizes.len() > 1 {
+                    format!(
+                        ", {} embedded table(s): {}",
+                        inst.chunk.stream_sizes.len() - 1,
+                        inst.chunk.stream_sizes[1..]
+                            .iter()
+                            .map(|s| format_bytes(*s))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  [{:02}] channel '{}' -> preset '{}' by '{}' (cat '{}', state {}, ver {:.4}{wt}) => {}",
+                    i + 1,
+                    if inst.channel_name.is_empty() {
+                        "-"
+                    } else {
+                        &inst.channel_name
+                    },
+                    if inst.chunk.meta.preset_name.is_empty() {
+                        "-"
+                    } else {
+                        &inst.chunk.meta.preset_name
+                    },
+                    if inst.chunk.meta.author.is_empty() {
+                        "-"
+                    } else {
+                        &inst.chunk.meta.author
+                    },
+                    if inst.chunk.meta.category.is_empty() {
+                        "-"
+                    } else {
+                        &inst.chunk.meta.category
+                    },
+                    format_bytes(inst.chunk.stream_sizes.first().copied().unwrap_or(0)),
+                    inst.chunk.meta.version_f32,
+                    path.display(),
+                );
+                for w in report.warnings() {
+                    println!("       note: {w}");
+                }
             }
         }
     }
@@ -206,31 +235,41 @@ fn run_extract(
 fn run_list(inputs: &[PathBuf]) -> Result<(), String> {
     let mut any = false;
     for input in inputs {
-        let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-        let (instances, stats) = scan_serum_instances(&buf)?;
-        for msg in &stats.failed {
-            eprintln!("warning: {msg}");
-        }
-        println!(
-            "{}: {} Serum preset(s), {} Serum2 instance(s)",
-            input.display(),
-            instances.len(),
-            stats.serum2_count
-        );
-        any = any || !instances.is_empty();
-        for (i, inst) in instances.iter().enumerate() {
+        for doc in read_input_docs(input)? {
+            let (instances, stats) = match scan_serum_instances(&doc.data) {
+                Ok(v) => v,
+                Err(e) => {
+                    if doc.from_archive {
+                        eprintln!("warning: skipping {}: {e}", doc.name);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+            for msg in &stats.failed {
+                print_warning(&doc, msg);
+            }
             println!(
-                "  [{:02}] channel {} '{}' plugin '{}' -> preset '{}' (author '{}', state {} bytes, {} stream(s), source {:?})",
-                i + 1,
-                inst.channel.map(|c| c.to_string()).unwrap_or("-".into()),
-                inst.channel_name,
-                inst.plugin_name,
-                inst.chunk.meta.preset_name,
-                inst.chunk.meta.author,
-                inst.chunk.stream_sizes.first().copied().unwrap_or(0),
-                inst.chunk.stream_sizes.len(),
-                inst.chunk.source,
+                "{}: {} Serum preset(s), {} Serum2 instance(s)",
+                doc.name,
+                instances.len(),
+                stats.serum2_count
             );
+            any = any || !instances.is_empty();
+            for (i, inst) in instances.iter().enumerate() {
+                println!(
+                    "  [{:02}] channel {} '{}' plugin '{}' -> preset '{}' (author '{}', state {} bytes, {} stream(s), source {:?})",
+                    i + 1,
+                    inst.channel.map(|c| c.to_string()).unwrap_or("-".into()),
+                    inst.channel_name,
+                    inst.plugin_name,
+                    inst.chunk.meta.preset_name,
+                    inst.chunk.meta.author,
+                    inst.chunk.stream_sizes.first().copied().unwrap_or(0),
+                    inst.chunk.stream_sizes.len(),
+                    inst.chunk.source,
+                );
+            }
         }
     }
     if !any {
@@ -291,111 +330,150 @@ fn run_convert(inputs: &[PathBuf], out: Option<&PathBuf>, dry_run: bool) -> Resu
     let mut source = flpconv::RealSource::embedded();
     let mut total_converted = 0usize;
     for input in inputs {
-        let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-        // Single walk: the plans already carry each instance's parsed Serum
-        // preset (plan.s1) and preset name; nothing re-scans the buffer.
-        let (plans, scan_warnings) = flpconv::scan_convertible_detailed(&buf)?;
-        if plans.is_empty() {
-            for w in &scan_warnings {
-                eprintln!("warning: {w}");
-            }
-            eprintln!("{}: no convertible Serum instances found", input.display());
-            continue;
+        let docs = read_input_docs(input)?;
+        if out.is_some() && docs.len() > 1 {
+            return Err(format!(
+                "--out cannot be used with '{}' (the archive holds {} .flp member(s); \
+                 extract the members or convert them one file at a time)",
+                input.display(),
+                docs.len()
+            ));
         }
-        println!(
-            "{}: converting {} Serum instance(s)",
-            input.display(),
-            plans.len()
-        );
-        let mut bundles: Vec<Option<flpconv::Serum2Bundle>> = Vec::with_capacity(plans.len());
-        for (i, plan) in plans.iter().enumerate() {
-            match source.bundle_for(plan, &[]) {
-                Ok(Some(bundle)) => bundles.push(Some(bundle)),
-                Ok(None) => {
-                    let reason = source
-                        .warnings
-                        .pop()
-                        .unwrap_or_else(|| "no Serum2 bundle produced".into());
-                    return Err(format!(
-                        "instance {} on channel '{}': {reason}",
-                        i + 1,
-                        if plan.channel_name.is_empty() {
-                            "-"
-                        } else {
-                            &plan.channel_name
-                        }
-                    ));
-                }
+        // Unique default output names span the members of one archive.
+        let mut used_out_names: HashMap<String, usize> = HashMap::new();
+        for doc in &docs {
+            // Single walk: the plans already carry each instance's parsed
+            // Serum preset (plan.s1) and preset name; nothing re-scans the
+            // buffer.
+            let (plans, scan_warnings) = match flpconv::scan_convertible_detailed(&doc.data) {
+                Ok(v) => v,
                 Err(e) => {
-                    return Err(format!(
-                        "instance {} on channel '{}': {e}",
-                        i + 1,
-                        if plan.channel_name.is_empty() {
-                            "-"
-                        } else {
-                            &plan.channel_name
-                        }
-                    ));
+                    if doc.from_archive {
+                        eprintln!("warning: skipping {}: {e}", doc.name);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+            if plans.is_empty() {
+                for w in &scan_warnings {
+                    print_warning(doc, w);
+                }
+                eprintln!("{}: no convertible Serum instances found", doc.name);
+                continue;
+            }
+            println!("{}: converting {} Serum instance(s)", doc.name, plans.len());
+            let mut bundles: Vec<Option<flpconv::Serum2Bundle>> = Vec::with_capacity(plans.len());
+            for (i, plan) in plans.iter().enumerate() {
+                match source.bundle_for(plan, &[]) {
+                    Ok(Some(bundle)) => bundles.push(Some(bundle)),
+                    Ok(None) => {
+                        let reason = source
+                            .warnings
+                            .pop()
+                            .unwrap_or_else(|| "no Serum2 bundle produced".into());
+                        return Err(format!(
+                            "instance {} on channel '{}': {reason}",
+                            i + 1,
+                            if plan.channel_name.is_empty() {
+                                "-"
+                            } else {
+                                &plan.channel_name
+                            }
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "instance {} on channel '{}': {e}",
+                            i + 1,
+                            if plan.channel_name.is_empty() {
+                                "-"
+                            } else {
+                                &plan.channel_name
+                            }
+                        ));
+                    }
                 }
             }
-        }
-        let (out_buf, report) = flpconv::apply(&buf, &plans, &bundles)?;
-        for (k, c) in report.converted.iter().enumerate() {
-            let state_bytes = plans[k]
-                .s1
-                .as_ref()
-                .map(|p| p.blob.len())
-                .unwrap_or_default();
+            let (out_buf, report) = flpconv::apply(&doc.data, &plans, &bundles)?;
+            for (k, c) in report.converted.iter().enumerate() {
+                let state_bytes = plans[k]
+                    .s1
+                    .as_ref()
+                    .map(|p| p.blob.len())
+                    .unwrap_or_default();
+                println!(
+                    "  [{:02}] channel '{}' preset '{}' (state {}) -> converted (cid3 {} B)",
+                    k + 1,
+                    if c.channel_name.is_empty() {
+                        "-"
+                    } else {
+                        &c.channel_name
+                    },
+                    if c.preset_name.is_empty() {
+                        "-"
+                    } else {
+                        &c.preset_name
+                    },
+                    format_bytes(state_bytes),
+                    c.new_payload_len,
+                );
+            }
+            total_converted += report.converted.len();
+            for w in &scan_warnings {
+                print_warning(doc, w);
+            }
+            for w in &report.warnings {
+                print_warning(doc, w);
+            }
+            if dry_run {
+                println!("dry run: no files written");
+                continue;
+            }
+            let out_path = match out {
+                Some(o) => o.clone(),
+                None if doc.from_archive => {
+                    let member = doc.name.rsplit('#').next().unwrap_or("member");
+                    let member_stem = Path::new(member)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "member".into());
+                    let input_stem = input
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "output".into());
+                    let base = sanitize_filename(&member_stem);
+                    let count = used_out_names.entry(base.clone()).or_insert(0);
+                    *count += 1;
+                    let name = if *count == 1 {
+                        format!("{input_stem}_{base}_serum2.flp")
+                    } else {
+                        format!("{input_stem}_{base}_{}_serum2.flp", count)
+                    };
+                    input.with_file_name(name)
+                }
+                None => {
+                    let mut name = input
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "output".into());
+                    name.push_str("_serum2");
+                    let ext = input
+                        .extension()
+                        .map(|e| format!(".{}", e.to_string_lossy()))
+                        .unwrap_or_default();
+                    input.with_file_name(format!("{name}{ext}"))
+                }
+            };
+            std::fs::write(&out_path, &out_buf)
+                .map_err(|e| format!("{}: {e}", out_path.display()))?;
             println!(
-                "  [{:02}] channel '{}' preset '{}' (state {}) -> converted (cid3 {} B)",
-                k + 1,
-                if c.channel_name.is_empty() {
-                    "-"
-                } else {
-                    &c.channel_name
-                },
-                if c.preset_name.is_empty() {
-                    "-"
-                } else {
-                    &c.preset_name
-                },
-                format_bytes(state_bytes),
-                c.new_payload_len,
+                "converted {} instance(s) -> {} ({} bytes)",
+                report.converted.len(),
+                out_path.display(),
+                out_buf.len()
             );
         }
-        total_converted += report.converted.len();
-        for w in &scan_warnings {
-            eprintln!("warning: {w}");
-        }
-        for w in &report.warnings {
-            eprintln!("warning: {w}");
-        }
-        if dry_run {
-            println!("dry run: no files written");
-            continue;
-        }
-        let out_path = match out {
-            Some(o) => o.clone(),
-            None => {
-                let mut name = input
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "output".into());
-                name.push_str("_serum2");
-                let ext = input
-                    .extension()
-                    .map(|e| format!(".{}", e.to_string_lossy()))
-                    .unwrap_or_default();
-                input.with_file_name(format!("{name}{ext}"))
-            }
-        };
-        std::fs::write(&out_path, &out_buf).map_err(|e| format!("{}: {e}", out_path.display()))?;
-        println!(
-            "converted {} instance(s) -> {} ({} bytes)",
-            report.converted.len(),
-            out_path.display(),
-            out_buf.len()
-        );
     }
     if total_converted == 0 {
         return Err("no instances converted".into());
