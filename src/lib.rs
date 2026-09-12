@@ -12,6 +12,8 @@
 //! - [`fxp`]: `.fxp` assembly and Serum2 import-rule validation.
 //! - [`core`]: reusable "scan an FLP for Serum instances" logic plus
 //!   small text / filename / hashing helpers shared by the CLI and wasm.
+//! - [`report`]: structured `--json` CLI report types (serde; camelCase
+//!   keys aligned with the wasm report fields).
 //! - [`zlibio`]: shared zlib inflate + Serum chunk stream splitting.
 //! - [`flpconv`]: FLP byte surgery rewriting Serum event-213 payloads
 //!   into Serum2 ones (plan / bundle / apply pipeline).
@@ -32,6 +34,7 @@ pub mod core;
 pub mod flp;
 pub mod flpconv;
 pub mod fxp;
+pub mod report;
 pub mod serum;
 pub mod zlibio;
 
