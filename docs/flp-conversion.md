@@ -99,8 +99,40 @@ authoritative description if regeneration is ever needed.
 | Surface | Entry point | Behavior |
 |---|---|---|
 | CLI | `flp-extract-fxp convert <input.flp> [--out <path>] [--dry-run]` | default output `<input>_serum2.flp` next to the input (`--out` accepted for a single input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance |
+| CLI | `flp-extract-fxp convert-fxp <inputs.fxp...> [--out <dir>] [--overwrite]` | standalone-preset variant (see §convert-fxp below); default output `<stem>.SerumPreset` next to each input; a failing input aborts with an error |
 | wasm | `convert_flp(data) -> ConvertReport` (`converted_count`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
 | web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` |
+
+## convert-fxp: standalone .fxp presets (EXPERIMENTAL output format)
+
+`flp-extract-fxp convert-fxp <inputs.fxp...> [--out <dir>] [--overwrite]`
+converts standalone Serum `.fxp` preset files (users who have presets but no
+FLP). The core entry point is `flpconv::convert_fxp_bytes` (`src/flpconv.rs`);
+it reuses the exact pieces of the FLP pipeline — chunk extraction
+(`serum::serum1_chunk_from_state`), `s1state::parse_preset`,
+`importer::convert_s1_to_s2(preset, 0)` (the same call `RealSource` makes) and
+`serum2state::build_processor_record` — so the produced processor record is
+byte-identical to the one the FLP flow embeds as inner cid 3 for the same
+preset (asserted per fixture in `flpconv::tests`). Each input also runs
+`fxp::validate_fxp`; fatals abort, warnings become notes in the report.
+
+Output: one `<stem>.SerumPreset` per input — Serum2's native preset-file
+container (`XferJson\0` + preset-style JSON header + one zstd frame; header
+shape per `s2-param-corpus.md` §2, builder in `src/serum2preset.rs`).
+
+**Honest caveat — experimental output variant.** The body embedded in the
+container is the **processor-state CBOR body, as-is** (the same frame the
+processor record carries). It is NOT the *authored* preset format Serum2's UI
+writes: the authored body carries extra UI-state top-level keys (`Osc`,
+`WTOsc`, `SerumGUI`, …) and drops the state-only `component` key
+(`s2-param-corpus.md` §3). A follow-up (or the state→authored converter from
+the extraction branch) will convert the body to the authored format; until
+then, treat the output as experimental, and note that final UI-load
+confirmation (dropping the file into Serum2's preset browser / user folder)
+is an owner-side step. What HAS been verified dynamically: the reconstructed
+processor record (identical frame + the processor JSON header, exactly what
+the FLP flow embeds) is accepted by the real Serum2.vst3 2.0.23 via
+`setState` for all 5 sample presets (see §Verification).
 
 ## Verification (real Serum2.vst3 2.0.23)
 
@@ -119,6 +151,12 @@ authoritative description if regeneration is ever needed.
   states carried valid md5 hashes, and the post-load states were byte-identical
   to the post-states of the real importer's output (4 of 5 exactly; the 5th
   differed by one 1-ULP leaf value in one build — see limitation (c)).
+- **convert-fxp dynamic acceptance** (same harness, reconstructed processor
+  records from the `.SerumPreset` output): all 5 presets accepted with code 0,
+  all post-load states valid, all byte-identical to the real importer's
+  post-states — `01 - Init -reese`, `02 Chord_Hyperpop_Chord`,
+  `03 indigo - basic shapes sub`, `04 - Init -`, `05 BS - YUKIYANAGI UKHC
+  BASS 01`.
 - **FLP-level integration tests** (`tests/integration.rs`):
   `convert_writes_output`, `converted_flp_scans_clean` (the converted file
   scans as 6 Serum2 instances: 5 converted + the pre-existing one),
@@ -161,3 +199,7 @@ warnings/output):
   this — proven by the sample project (the converted FLP loads and the states
   are accepted). The processor record, which we synthesize fresh, carries
   2.0.23 / version 9.0.
+- **(g) `convert-fxp` output is the processor-state container variant** — see
+  §convert-fxp above: the embedded body is the converted processor state
+  wrapped in a preset-style header, not the authored preset format. Final
+  UI-load confirmation is an owner-side step.

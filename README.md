@@ -6,6 +6,7 @@ FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum
 - Serum2 の Serum インポートチェック (静的逆解析、下記参照) を満たす fxp を生成
 - 書き出し前にバリデーションし、Serum2 が拒否するファイルは既定で出力しない
 - `convert`: FLP 内の Serum インスタンスを変換済み Serum2 インスタンスに書き換えた FLP を生成 (下記参照)
+- `convert-fxp`: 単体の Serum .fxp プリセットを Serum2 の .SerumPreset ファイルへ変換 (実験的、下記参照)
 
 ## ビルド
 
@@ -65,6 +66,23 @@ flp-extract-fxp convert --dry-run a.flp
 FLP 内の Serum (シンセ) インスタンスごとにプリセット状態を Serum2 形式へ完全変換し、プラグインスロットを Serum2 に書き換えます。変換後の FLP を FL Studio で開くと Serum2 が既に読み込まれた状態になり、手作業のプラグイン差し替え + fxp インポートが不要になります。ウェーブテーブルデータは変換後の状態に埋め込まれるため、追加ファイルは不要です。
 
 再生には実際の Serum2 (VST3) のインストールが必要です。Web UI にも同じ変換があり、「Convert to Serum2」ボタンでブラウザ内で変換し `<名前>-serum2.flp` としてダウンロードできます。パイプラインと検証方法の詳細は [docs/flp-conversion.md](docs/flp-conversion.md) を参照してください。
+
+### `convert-fxp` — 単体の Serum .fxp を Serum2 .SerumPreset へ変換 (実験的)
+
+```sh
+flp-extract-fxp convert-fxp preset.fxp
+flp-extract-fxp convert-fxp a.fxp b.fxp -o out_dir
+flp-extract-fxp convert-fxp --overwrite a.fxp
+```
+
+| フラグ | 意味 |
+|---|---|
+| `-o`, `--out <DIR>` | 出力ディレクトリ。既定は入力ファイルと同じ場所 |
+| `--overwrite` | 既存出力ファイルを上書き (既定はスキップ) |
+
+FLP を持たない「プリセットファイルだけ」あるユーザー向けに、単体の Serum .fxp を FL Studio を介さず直接変換します。変換パイプラインは `convert` と完全に同じ (チャンク抽出 → `parse_preset` → インポータ → プロセッサレコード) で、出力は `<入力名>.SerumPreset` です。
+
+**実験的な出力形式について (正直な注記)**: 出力コンテナは Serum2 のネイティブ .SerumPreset と同じ `XferJson\0` 形式 (プリセット用 JSON ヘッダ + zstd フレーム) ですが、中身は**インスタンス状態 (processor state) バリアントの CBOR ボディ**をそのまま格納したものです。Serum2 が UI で保存する「オーサリング済み」プリセット形式 (UI 状態キーを含む) とは異なります。実機の `IComponent::setState` では 5/5 のプリセットが受諾され (docs/flp-conversion.md 参照)、後続の対応でオーサリング済み形式への変換を行う予定です。UI でのロード確認はオーナー側の最終ステップとして残っています。
 
 ## 出力ファイル名
 

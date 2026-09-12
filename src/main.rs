@@ -58,6 +58,17 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Convert standalone Serum .fxp presets into Serum2 .SerumPreset files.
+    ConvertFxp {
+        /// Serum .fxp preset files to process.
+        inputs: Vec<PathBuf>,
+        /// Output directory (default: alongside each input).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Overwrite existing output files.
+        #[arg(long)]
+        overwrite: bool,
+    },
 }
 
 fn run_extract(
@@ -403,6 +414,62 @@ fn run_convert(inputs: &[PathBuf], out: Option<&PathBuf>, dry_run: bool) -> Resu
     Ok(())
 }
 
+/// Convert standalone Serum .fxp presets into Serum2 .SerumPreset files.
+/// Abort-on-error semantics like `run_convert`: the first input that fails
+/// validation or conversion stops the run with an error.
+fn run_convert_fxp(
+    inputs: &[PathBuf],
+    out: Option<&PathBuf>,
+    overwrite: bool,
+) -> Result<(), String> {
+    let mut total = 0usize;
+    for (k, input) in inputs.iter().enumerate() {
+        let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+        let c =
+            flpconv::convert_fxp_bytes(&buf).map_err(|e| format!("{}: {e}", input.display()))?;
+        for n in &c.notes {
+            eprintln!("warning: {n}");
+        }
+        let out_dir = match out {
+            Some(o) => o.clone(),
+            None => input
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from(".")),
+        };
+        std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
+        let stem = input
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "preset".into());
+        let path = out_dir.join(format!("{}.SerumPreset", sanitize_filename(&stem)));
+        if path.exists() && !overwrite {
+            eprintln!("{} exists, skipped (use --overwrite)", path.display());
+            continue;
+        }
+        std::fs::write(&path, &c.serum_preset).map_err(|e| format!("{}: {e}", path.display()))?;
+        total += 1;
+        println!(
+            "[{:02}] preset '{}' (state {}, {} stream(s), ver {:.4}) -> converted (body {} B) => {}",
+            k + 1,
+            if c.preset_name.is_empty() {
+                "-"
+            } else {
+                &c.preset_name
+            },
+            format_bytes(c.state_size),
+            c.stream_count,
+            c.version_f32,
+            c.body_cbor_len,
+            path.display(),
+        );
+    }
+    if total == 0 {
+        return Err("no presets converted".into());
+    }
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
     let result = match &cli.command {
@@ -419,6 +486,11 @@ fn main() {
             out,
             dry_run,
         } => run_convert(inputs, out.as_ref(), *dry_run),
+        Command::ConvertFxp {
+            inputs,
+            out,
+            overwrite,
+        } => run_convert_fxp(inputs, out.as_ref(), *overwrite),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
