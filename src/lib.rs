@@ -23,7 +23,8 @@
 //! - [`s2tables`]: GENERATED runtime-dumped Serum2 descriptor tables
 //!   (never hand-edit; provenance in docs/s2-runtime-tables.md).
 //! - [`s2tree`]: deterministic CBOR value tree + raw zstd frames.
-//! - [`serum2state`]: Serum2 `XferJson` container assembly and parsing.
+//! - [`serum2state`]: Serum2 `XferJson` container assembly and parsing,
+//!   including the state → authored (`.SerumPreset`) body conversion.
 //! - `web`: `wasm-bindgen` bindings; only compiled when targeting
 //!   `wasm32-unknown-unknown` (cfg-gated, so native builds never link it).
 //! - `testutil`: `#[cfg(test)]` helpers shared by crate-internal tests.
@@ -48,4 +49,4 @@ pub(crate) mod testutil;
 pub mod web;
 
 /// Convenience re-exports of the most-used scanning API.
-pub use core::{Instance, ScanStats, scan_serum_instances};
+pub use core::{Instance, ScanStats, Serum2Instance, scan_serum_instances, scan_serum2_instances};

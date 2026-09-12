@@ -182,6 +182,42 @@ fn fl_vst3_wrapper_cid3(state: &[u8]) -> Option<&[u8]> {
     None
 }
 
+/// Walk FL's VST3 wrapper state and return the Serum2 `XferJson` records:
+/// `(processor = inner cid 3, controller = inner cid 2)` — see
+/// `docs/flp-serum2-conversion.md` §3.1/§4. Only accepted when the record
+/// walk consumes the state exactly, the 64-byte cid-1 header record is
+/// present, and the cid-3 payload carries the `XferJson` magic.
+pub fn serum2_records_from_state(state: &[u8]) -> Option<(&[u8], &[u8])> {
+    for start in 0..=8usize {
+        let Some(rest) = state.get(start..) else {
+            continue;
+        };
+        let Some(mut recs) = crate::flp::records(rest) else {
+            continue;
+        };
+        let mut cid3: Option<&[u8]> = None;
+        let mut cid2: Option<&[u8]> = None;
+        let mut has_cid1 = false;
+        for (cid, data) in recs.by_ref() {
+            match cid {
+                1 if data.len() == 64 => has_cid1 = true,
+                3 if cid3.is_none() => cid3 = Some(data),
+                2 if cid2.is_none() => cid2 = Some(data),
+                _ => {}
+            }
+        }
+        if !recs.overran()
+            && recs.pos() == rest.len()
+            && has_cid1
+            && cid3.is_some_and(|c| c.starts_with(b"XferJson"))
+            && cid2.is_some_and(|c| c.starts_with(b"XferJson"))
+        {
+            return Some((cid3.expect("checked"), cid2.expect("checked")));
+        }
+    }
+    None
+}
+
 /// Extract the `CcnK` preset chunk out of a complete VST2 fxp/fxb blob.
 fn chunk_from_ccnk(blob: &[u8]) -> Result<&[u8], String> {
     if blob.len() < 0x3C || &blob[0..4] != b"CcnK" {
@@ -322,6 +358,47 @@ mod tests {
         state.extend_from_slice(&(cid3.len() as u64).to_le_bytes());
         state.extend_from_slice(&cid3);
         assert!(serum1_chunk_from_state(&state).is_err());
+    }
+
+    /// Genuine Serum2 wrapper layout: `[prol=1][cid1 64B][cid3 processor]
+    /// [cid2 controller][cid4]` (docs/flp-serum2-conversion.md §3.1).
+    #[test]
+    fn serum2_wrapper_records() {
+        let cid3 = b"XferJson\0processor".to_vec();
+        let cid2 = b"XferJson\0controller".to_vec();
+        let mut state = Vec::new();
+        state.extend_from_slice(&[1, 0, 0, 0]);
+        for (cid, payload) in [
+            (1u32, vec![0u8; 64]),
+            (3u32, cid3.clone()),
+            (2u32, cid2.clone()),
+            (4u32, vec![0u8; 8]),
+        ] {
+            state.extend_from_slice(&cid.to_le_bytes());
+            state.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            state.extend_from_slice(&payload);
+        }
+        let (proc, ctrl) = serum2_records_from_state(&state).expect("records");
+        assert_eq!(proc, cid3);
+        assert_eq!(ctrl, cid2);
+
+        // A Serum (Serum1) wrapper — no cid-2, cid-3 not XferJson — is
+        // rejected.
+        let rejected = {
+            let mut s = Vec::new();
+            s.extend_from_slice(&[1, 0, 0, 0]);
+            for (cid, payload) in [
+                (1u32, vec![0u8; 64]),
+                (3u32, vec![0x78, 0x01, 0x02]),
+                (4u32, vec![0u8; 8]),
+            ] {
+                s.extend_from_slice(&cid.to_le_bytes());
+                s.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+                s.extend_from_slice(&payload);
+            }
+            serum2_records_from_state(&s).is_some()
+        };
+        assert!(!rejected);
     }
 
     #[test]

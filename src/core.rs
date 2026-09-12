@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::flp;
 use crate::serum;
+use crate::serum2state;
 
 /// Diagnostics collected while scanning an FLP.
 #[derive(Debug, Default)]
@@ -36,6 +37,26 @@ pub struct Instance {
     pub plugin_name: String,
     /// Recovered Serum preset chunk plus parsed metadata.
     pub chunk: serum::Serum1Chunk,
+}
+
+/// A Serum2 instance discovered in an FLP: the inner `XferJson` processor
+/// (cid 3) and controller (cid 2) records of FL's VST3 wrapper state
+/// (`docs/flp-serum2-conversion.md` §3.1).
+#[derive(Debug)]
+pub struct Serum2Instance {
+    /// Numeric FL Studio channel the plugin was inserted on, if known.
+    pub channel: Option<u16>,
+    /// Channel name, falling back to the FX track name.
+    pub channel_name: String,
+    /// Plugin display name as stored in the FLP.
+    pub plugin_name: String,
+    /// Inner cid-3 `XferJson` record (instantiated processor state).
+    pub processor: Vec<u8>,
+    /// Inner cid-2 `XferJson` record (controller state; its JSON header
+    /// carries the preset identity).
+    pub controller: Vec<u8>,
+    /// Preset name/author/description from the controller JSON header.
+    pub meta: serum2state::ControllerMeta,
 }
 
 /// Walk the events once, associating plugin params with channel / FX names.
@@ -104,6 +125,69 @@ pub fn scan_serum_instances(buf: &[u8]) -> Result<(Vec<Instance>, ScanStats), St
         }
     }
     Ok((instances, stats))
+}
+
+/// Like [`scan_serum_instances`], but for Serum2 instances: returns every
+/// Serum2 plugin instance's processor + controller records in file order
+/// plus per-instance skip warnings (instances whose wrapper state does not
+/// match the documented record layout are reported, not fatal).
+pub fn scan_serum2_instances(buf: &[u8]) -> Result<(Vec<Serum2Instance>, Vec<String>), String> {
+    let events = flp::parse_events(buf)?;
+    let mut channels: HashMap<u16, String> = HashMap::new();
+    let mut cur_channel: Option<u16> = None;
+    let mut cur_fx_name = String::new();
+    let mut instances = Vec::new();
+    let mut warnings = Vec::new();
+
+    for ev in &events {
+        match ev.id {
+            flp::EV_NEW_CHANNEL => {
+                if ev.data.len() >= 2 {
+                    cur_channel = Some(u16::from_le_bytes([ev.data[0], ev.data[1]]));
+                }
+            }
+            flp::EV_TEXT_CHANNEL_NAME => {
+                if let Some(ch) = cur_channel {
+                    channels.insert(ch, text(ev.data));
+                }
+            }
+            flp::EV_TEXT_FX_TRACK_NAME => {
+                cur_fx_name = text(ev.data);
+            }
+            flp::EV_PLUGIN_PARAMS => {
+                let Ok(pp) = flp::parse_plugin_params(ev.data) else {
+                    continue;
+                };
+                if !serum::is_serum2(pp.name, pp.filename) || pp.state.is_empty() {
+                    continue;
+                }
+                let where_ = cur_channel
+                    .and_then(|c| channels.get(&c).cloned())
+                    .unwrap_or_else(|| cur_fx_name.clone());
+                match serum::serum2_records_from_state(pp.state) {
+                    Some((processor, controller)) => {
+                        let meta = match serum2state::parse_xfer_json(controller) {
+                            Ok((json, ..)) => serum2state::controller_meta_from_json(&json),
+                            Err(_) => serum2state::ControllerMeta::default(),
+                        };
+                        instances.push(Serum2Instance {
+                            channel: cur_channel,
+                            channel_name: where_,
+                            plugin_name: text(pp.name),
+                            processor: processor.to_vec(),
+                            controller: controller.to_vec(),
+                            meta,
+                        });
+                    }
+                    None => warnings.push(format!(
+                        "skipped a Serum2 instance ({where_}): unrecognized VST3 wrapper state"
+                    )),
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((instances, warnings))
 }
 
 /// Fallback channel label for report messages (`-` when empty).

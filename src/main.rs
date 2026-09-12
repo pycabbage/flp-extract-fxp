@@ -9,11 +9,17 @@
 use clap::{Parser, Subcommand};
 use flp_extract_fxp::core::{
     default_out_dir, format_bytes, hash_bytes, sanitize_filename, scan_serum_instances,
+    scan_serum2_instances,
 };
 use flp_extract_fxp::flpconv::BundleSource;
-use flp_extract_fxp::{flpconv, fxp, serum};
+use flp_extract_fxp::{flpconv, fxp, serum, serum2state};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Fallback label for report messages (`-` when empty).
+fn display_name(name: &str) -> &str {
+    if name.is_empty() { "-" } else { name }
+}
 
 #[derive(Parser)]
 #[command(
@@ -44,6 +50,9 @@ enum Command {
         /// Keep extracting even when a preset fails Serum2 validation.
         #[arg(long)]
         keep_invalid: bool,
+        /// Also extract Serum2 instances as .SerumPreset preset files.
+        #[arg(long)]
+        serum2: bool,
     },
     /// Check .fxp files against Serum2's Serum import rules.
     Validate { inputs: Vec<PathBuf> },
@@ -65,6 +74,7 @@ fn run_extract(
     out: Option<&PathBuf>,
     overwrite: bool,
     keep_invalid: bool,
+    serum2: bool,
 ) -> Result<(), String> {
     let mut total_extracted = 0usize;
     let mut total_invalid = 0usize;
@@ -74,7 +84,17 @@ fn run_extract(
         for msg in &stats.failed {
             eprintln!("warning: {msg}");
         }
-        if instances.is_empty() {
+        // Serum2 instances: only scanned (and extracted) with --serum2.
+        let s2_instances = if serum2 {
+            let (insts, warnings) = scan_serum2_instances(&buf)?;
+            for msg in &warnings {
+                eprintln!("warning: {msg}");
+            }
+            insts
+        } else {
+            Vec::new()
+        };
+        if instances.is_empty() && s2_instances.is_empty() {
             eprintln!(
                 "{}: no Serum presets found ({} Serum2 instance(s) skipped)",
                 input.display(),
@@ -189,6 +209,69 @@ fn run_extract(
             );
             for w in report.warnings() {
                 println!("       note: {w}");
+            }
+        }
+
+        // --serum2: write one .SerumPreset per Serum2 instance.
+        if serum2 {
+            let mut used_s2: HashMap<String, usize> = HashMap::new();
+            for (i, inst) in s2_instances.iter().enumerate() {
+                let file_bytes = match serum2state::preset_file_from_processor(
+                    &inst.processor,
+                    inst.meta.clone(),
+                ) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        eprintln!(
+                            "  [S2 {:02}] skipped a Serum2 instance (channel '{}'): {e}",
+                            i + 1,
+                            if inst.channel_name.is_empty() {
+                                "-"
+                            } else {
+                                &inst.channel_name
+                            }
+                        );
+                        continue;
+                    }
+                };
+                let base_name = if !inst.meta.preset_name.is_empty() {
+                    inst.meta.preset_name.clone()
+                } else {
+                    format!("Instance {}", i + 1)
+                };
+                let base = sanitize_filename(&base_name);
+                let count = used_s2.entry(base.clone()).or_insert(0);
+                *count += 1;
+                let file_name = if *count == 1 {
+                    format!("{:02}_{base}.SerumPreset", i + 1)
+                } else {
+                    format!("{:02}_{base}_{count}.SerumPreset", i + 1)
+                };
+                let path = out_dir.join(&file_name);
+                if path.exists() && !overwrite {
+                    eprintln!(
+                        "  [S2 {:02}] {} exists, skipped (use --overwrite)",
+                        i + 1,
+                        path.display()
+                    );
+                    continue;
+                }
+                std::fs::write(&path, &file_bytes)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                total_extracted += 1;
+                println!(
+                    "  [S2 {:02}] channel '{}' -> preset '{}' by '{}' ({} B) => {}",
+                    i + 1,
+                    if inst.channel_name.is_empty() {
+                        "-"
+                    } else {
+                        &inst.channel_name
+                    },
+                    display_name(&inst.meta.preset_name),
+                    display_name(&inst.meta.preset_author),
+                    file_bytes.len(),
+                    path.display()
+                );
             }
         }
     }
@@ -412,7 +495,8 @@ fn main() {
             out,
             overwrite,
             keep_invalid,
-        } => run_extract(inputs, out.as_ref(), *overwrite, *keep_invalid),
+            serum2,
+        } => run_extract(inputs, out.as_ref(), *overwrite, *keep_invalid, *serum2),
         Command::Validate { inputs } => run_validate(inputs),
         Command::Convert {
             inputs,
