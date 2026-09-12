@@ -89,6 +89,7 @@ silently when absent, so a fresh clone builds and tests green.
 | `tests/fixtures/golden_s2/0N_processor_state.bin` | converted processor records produced by the REAL importer | call `s1state_load` at runtime per `docs/s2-runtime-tables.md` (harness method), wrap with `serum2state::build_processor_record`-equivalent container rules |
 | `tests/fixtures/extracted_serum1.fxp` | extraction-feature fixture | `flp-extract-fxp extract` on the sample project, keep preset 01 |
 | `docs/data/*.json` | runtime-dumped descriptor / remap / defaults tables | dump per `docs/s2-runtime-tables.md` (LoadLibraryW + InitDll + memory reads) |
+| `C:\Users\cabbage\Documents\Xfer\Serum 2 Presets\Presets\Factory\**\*.SerumPreset` | the 626 real Serum2 factory presets (read-only, never copied into the repo) | shipped with any Serum2 install; the `corpus_preset_round_trip` test reads 5 of them only when `FLPX_S2_CORPUS_DIR` points there |
 | `tools/` | table generator (`gen_s2tables.py`), template extractor, canonical CBOR reference encoder | session scaffolding; `src/s2tables.rs` is committed, so nothing in the repo needs them |
 
 Provenance of every dumped constant is documented in
@@ -117,10 +118,111 @@ when one can be produced.
 
 | Surface | Entry point | Behavior |
 |---|---|---|
-| CLI | `flp-extract-fxp convert <input.flp> [--out <path>] [--dry-run]` | default output `<input>_serum2.flp` next to the input (`--out` accepted for a single input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance |
-| CLI | `flp-extract-fxp convert-fxp <inputs.fxp...> [--out <dir>] [--overwrite]` | standalone-preset variant (see §convert-fxp below); default output `<stem>.SerumPreset` next to each input; a failing input aborts with an error |
-| wasm | `convert_flp(data) -> ConvertReport` (`converted_count`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
-| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` |
 | CLI | `flp-extract-fxp convert <input.flp|input.zip> [--out <path>] [--dry-run] [--json]` | default output `<input>_serum2.flp` next to the input, or `<input>_<member>_serum2.flp` per archive member (`--out` accepted for a single-document input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance; `--json` prints a structured `ConvertReport` (camelCase keys aligned with the wasm report) on stdout and moves progress to stderr |
+| CLI | `flp-extract-fxp convert-fxp <inputs.fxp...> [--out <dir>] [--overwrite]` | standalone-preset variant (see §convert-fxp below); default output `<stem>.SerumPreset` next to each input; a failing input aborts with an error |
 | wasm | `convert_flp(data) -> ConvertReport` (`converted_count`, `doc_count`/`doc_name_at`/`flp_at`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
 | web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` (a multi-member zip input downloads `<name>-serum2.zip` with one converted .flp per member) |
+
+## Serum2 preset extraction (`extract --serum2`)
+
+While `extract` normally skips Serum2 instances (their `XferJson` state is not
+a Serum chunk), `flp-extract-fxp extract --serum2` additionally writes one
+`<nn>_<presetName>.SerumPreset` per Serum2 instance — Serum2's native preset
+format — into the regular output directory. Without the flag, behavior is
+unchanged. Each instance's inner cid-3 (processor) record supplies the preset
+body; the inner cid-2 (controller) record's JSON header supplies
+`presetName`/`presetAuthor`/`presetDescription` (fallback file name
+`Instance N`).
+
+The authored body is derived from the instantiated state body by
+`serum2state::state_body_to_authored` (grounded against the 626-file factory
+corpus, `s2-param-corpus.md` §3/§9): drop the state-only `component` key,
+copy all per-instance sections and meta keys 1:1, add the 14 authored-only
+keys — 8 engine-type UI keys (`WTOsc`/`Osc`/`MultiSampleOsc`/`SpectralOsc`/
+`GranularOsc` arrays, `Filter`/`ClipPlayer`/`SerumGUI` maps) with
+corpus-consensus default values, and 6 metadata keys (`fileType`,
+`presetName`, `presetAuthor`, `presetDescription`, empty
+`arpBankDisplayName`/`clipBankDisplayName`). 162 − 1 + 14 = the standard
+175 top-level keys; the container is re-assembled with a recomputed md5
+(`build_preset_file`), with `productVersion`/`version` carried from the
+state body (fallback `2.0.23`/`9.0`).
+
+Verification status — honest:
+
+- **Structural**: the generated file parses as a standard `XferJson`
+  container (one zstd frame, `hash` = md5(frame), declared size exact); its
+  top-level key set is **identical** to real factory presets (175 keys,
+  zero diff against the corpus), and its per-instance sections are byte-form
+  copies of a state Serum2 itself accepts (the FLP-conversion goldens).
+  An env-gated test (`FLPX_S2_CORPUS_DIR`) round-trips 5 real factory
+  presets through the same encode/decode path.
+- **NOT yet verified: does the Serum2 UI load the file?** The preset browser
+  cannot be driven by the dynamic-verification harness, so no live
+  load-acceptance test exists for `.SerumPreset` files (unlike the FLP
+  conversion path, whose processor states were accepted via `setState`).
+  Risk areas are the synthesized UI-map default values (pure UI state, no
+  engine parameters) and the optional authored-only naming keys that a state
+  does not carry (`Macro.name`, `displayName`, `curveDisplayName`,
+  `arpBankDisplayName`/`clipBankDisplayName`) — all optional in the corpus,
+  where they vary per file. Treat the output as structurally valid until a
+  manual load check is done.
+
+## Verification (real Serum2.vst3 2.0.23)
+
+- **Byte-identity vs the real importer**: golden converted states for the 5
+  presets of the sample project were produced by calling the REAL
+  `s1state_load` at runtime (ctypes harness: `LoadLibraryW` + `InitDll`, call
+  at `base+0x4DABC0` with derived args). Unit tests
+  `golden_byte_identical_01..05` (`src/importer.rs`) require the Rust
+  converter's CBOR bodies to equal them; the fixtures are untracked (see
+  above) and the tests skip when they are absent. The zstd frame differs only
+  in compression level (we emit raw-block frames; the goldens used libzstd
+  level 3) — both are standard frames, and both are accepted by the plugin.
+- **Dynamic acceptance**: the 5 converted cid-3 processor states inside a
+  converted real FLP (`tests/fixtures/serina1.flp`) were fed via `setState` to
+  fresh real Serum2 instances: all returned kResultOk (0), all post-load
+  states carried valid md5 hashes, and the post-load states were byte-identical
+  to the post-states of the real importer's output (4 of 5 exactly; the 5th
+  differed by one 1-ULP leaf value in one build — see limitation (c)).
+- **FLP-level integration tests** (`tests/integration.rs`):
+  `convert_writes_output`, `converted_flp_scans_clean` (the converted file
+  scans as 6 Serum2 instances: 5 converted + the pre-existing one),
+  `converted_flp_diff_is_localized` (the diff is limited to the Serum
+  instances' event-213 payloads).
+- **Browser flow** verified end-to-end (scan → convert → download).
+
+## Limitations
+
+Known and deliberate; none hidden from the user (the tools report them in
+warnings/output):
+
+- **(a) Only modern-format Serum presets** (172,736-byte state blobs,
+  Serum ≥ ~1.2) are converted. Old-format (2015-era, 21,808 / 28,232-byte
+  blobs) presets are rejected by the S1 parser: the wasm/web path leaves the
+  instance untouched with a warning, the CLI aborts the file with an error
+  naming the instance.
+- **(b) Serum FX instances are not converted** — there is no calibrated
+  Serum2-FX FLP template. They are left untouched and reported (warning +
+  skipped).
+- **(c) `pow()` 1-ULP divergence**: `pow()` differs by 1 ULP between the
+  native (CRT) and wasm (Rust libm) builds, which can shift ONE leaf value per
+  affected preset by 1 ULP (observed: `Global0.kParamPortamentoTime` in preset
+  01, `Env0.kParamAttack` in preset 05). Serum2's own re-serialization is
+  more nondeterministic than this (double-vs-f32 re-emission between
+  sessions), so this is cosmetic. CLI and wasm outputs are otherwise
+  byte-identical.
+- **(d) Wavetable data is embedded**: the converted state references
+  wavetable/noise data via embedded CBOR byte strings
+  (`embeddedWTData`/`embeddedNoiseData`), exactly like the real importer — no
+  external files are needed, and nothing is written next to the FLP.
+- **(e) Raw-block zstd frames** (uncompressed) grow the FLP by ~0.4 MB per
+  converted instance compared to Serum2's own compressed frames. The plugin
+  accepts them; smaller frames are a future optimization.
+- **(f) Controller template is 2.0.22-era**: the controller record template
+  (`docs/data/serum2_controller_record.bin`, lifted from the genuine Serum2
+  instance in the calibration project) gets its JSON header patched per preset
+  (preset name/author/description), but its `productVersion` strings remain
+  those of the embedded calibration record (2.0.22). FL and Serum2 tolerate
+  this — proven by the sample project (the converted FLP loads and the states
+  are accepted). The processor record, which we synthesize fresh, carries
+  2.0.23 / version 9.0.
