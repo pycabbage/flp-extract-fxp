@@ -16,8 +16,8 @@ export function UploadCard(props: {
       <CardHeader>
         <CardTitle>Load a project file</CardTitle>
         <CardDescription>
-          Drop an .flp file below or pick one from disk. The scan looks for Serum plugin instances
-          and extracts their preset state.
+          Drop an .flp or zipped loop package (.zip) below or pick one from disk. The scan looks for
+          Serum plugin instances and extracts their preset state.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -56,7 +56,7 @@ export function UploadCard(props: {
             <>
               <FileAudioIcon className="text-muted-foreground size-8" />
               <div className="space-y-1">
-                <p className="text-sm font-medium">Drag &amp; drop your .flp file here</p>
+                <p className="text-sm font-medium">Drag &amp; drop your .flp or .zip here</p>
                 <p className="text-muted-foreground text-xs">
                   or click to browse — files are processed locally
                 </p>
@@ -68,7 +68,7 @@ export function UploadCard(props: {
                   props.onPick()
                 }}
               >
-                <UploadIcon /> Select .flp file
+                <UploadIcon /> Select .flp / .zip
               </Button>
             </>
           )}
