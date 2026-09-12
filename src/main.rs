@@ -16,6 +16,11 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// The built-in naming template. It must keep reproducing the pre-template
+/// output byte-exactly - including how duplicate preset names were
+/// disambiguated (see [`next_output_file_name`]).
+const DEFAULT_NAME_TEMPLATE: &str = "{index}_{preset}";
+
 #[derive(Parser)]
 #[command(
     name = "flp-extract-fxp",
@@ -47,9 +52,11 @@ enum Command {
         keep_invalid: bool,
         /// Output file name template. Placeholders: {index} {preset}
         /// {channel} {author} {category}; unknown ones resolve to empty and
-        /// each substituted value is sanitized separately.
+        /// each substituted value is sanitized separately. Literal template
+        /// text is used verbatim, so '/', '\' and '..' written there can
+        /// create subdirectories or escape the --out directory.
         /// Example: --name-template "{preset}_{author}"
-        #[arg(long, default_value = "{index}_{preset}")]
+        #[arg(long, default_value = DEFAULT_NAME_TEMPLATE)]
         name_template: String,
     },
     /// Check .fxp files against Serum2's Serum import rules.
@@ -141,6 +148,56 @@ fn render_name_template(
     }
 }
 
+/// The base name for one instance under `name_template`.
+///
+/// For [`DEFAULT_NAME_TEMPLATE`] this is the index-free legacy base
+/// (sanitized fallback chain): the `{index}` prefix and the duplicate suffix
+/// are added by [`next_output_file_name`], keyed on this base, so the default
+/// output stays byte-exact with the pre-template naming. Any other template
+/// renders to the full name, which is also the dedup key.
+fn template_base(
+    name_template: &str,
+    index: usize,
+    preset: &str,
+    channel: &str,
+    author: &str,
+    category: &str,
+) -> String {
+    if name_template == DEFAULT_NAME_TEMPLATE {
+        sanitize_filename(&naming_fallback(index, preset, channel))
+    } else {
+        render_name_template(name_template, index, preset, channel, author, category)
+    }
+}
+
+/// Consume one dedup slot for `base` and build the output file name.
+///
+/// Under the default template the suffix is inserted between the index
+/// prefix and the base name (`01_Lead.fxp`, then `02_Lead_2.fxp`) - exactly
+/// the pre-template layout, because dedup keys on the index-free base.
+/// Custom templates key dedup on the whole rendered name and append the
+/// suffix at the end (`Lead.fxp`, then `Lead_2.fxp`).
+fn next_output_file_name(
+    used_names: &mut HashMap<String, usize>,
+    base: &str,
+    index: usize,
+    is_default_template: bool,
+) -> String {
+    let count = used_names.entry(base.to_string()).or_insert(0);
+    *count += 1;
+    if is_default_template {
+        if *count == 1 {
+            format!("{index:02}_{base}.fxp")
+        } else {
+            format!("{index:02}_{base}_{count}.fxp")
+        }
+    } else if *count == 1 {
+        format!("{base}.fxp")
+    } else {
+        format!("{base}_{count}.fxp")
+    }
+}
+
 fn run_extract(
     inputs: &[PathBuf],
     out: Option<&PathBuf>,
@@ -196,7 +253,7 @@ fn run_extract(
             let report = fxp::validate_chunk_report(&inst.chunk.chunk);
             let file = fxp::build_fxp(&inst.chunk.chunk, &inst.chunk.meta.preset_name);
 
-            let base = render_name_template(
+            let base = template_base(
                 name_template,
                 i + 1,
                 &inst.chunk.meta.preset_name,
@@ -204,13 +261,12 @@ fn run_extract(
                 &inst.chunk.meta.author,
                 &inst.chunk.meta.category,
             );
-            let count = used_names.entry(base.clone()).or_insert(0);
-            *count += 1;
-            let file_name = if *count == 1 {
-                format!("{base}.fxp")
-            } else {
-                format!("{base}_{count}.fxp")
-            };
+            let file_name = next_output_file_name(
+                &mut used_names,
+                &base,
+                i + 1,
+                name_template == DEFAULT_NAME_TEMPLATE,
+            );
             let path = out_dir.join(&file_name);
             if path.exists() && !overwrite {
                 eprintln!(
@@ -577,6 +633,53 @@ mod tests {
         assert_eq!(
             render_name_template("a/b_{preset}", 1, "P", "", "", ""),
             "a/b_P"
+        );
+    }
+
+    #[test]
+    fn default_template_duplicates_match_legacy_names() {
+        // Regression: under the default template dedup must key on the
+        // index-free base, so two presets named "Lead" come out as
+        // 01_Lead.fxp / 02_Lead_2.fxp (suffix between index and base),
+        // byte-exact with the pre-template naming - not 01_Lead.fxp /
+        // 02_Lead.fxp, which is what keying on the templated name produced.
+        let mut used_names: HashMap<String, usize> = HashMap::new();
+        let mut names = Vec::new();
+        for i in 0..3 {
+            let index = i + 1;
+            let preset = if i == 2 { "Bass" } else { "Lead" };
+            let base = template_base(DEFAULT_NAME_TEMPLATE, index, preset, "Ch", "", "");
+            names.push(next_output_file_name(&mut used_names, &base, index, true));
+        }
+        assert_eq!(names, ["01_Lead.fxp", "02_Lead_2.fxp", "03_Bass.fxp"]);
+    }
+
+    #[test]
+    fn custom_template_duplicates_get_suffix() {
+        // Custom templates dedup on the whole rendered name; identical
+        // renders get a _N suffix appended at the end.
+        let mut used_names: HashMap<String, usize> = HashMap::new();
+        let mut names = Vec::new();
+        for i in 0..2 {
+            let index = i + 1;
+            let base = template_base("{preset}", index, "Lead", "", "A", "C");
+            names.push(next_output_file_name(&mut used_names, &base, index, false));
+        }
+        assert_eq!(names, ["Lead.fxp", "Lead_2.fxp"]);
+        // Distinct renders never collide, even when they differ only in the
+        // index...
+        assert_eq!(
+            template_base("{preset}_{index}", 1, "Lead", "", "", ""),
+            "Lead_01"
+        );
+        assert_eq!(
+            template_base("{preset}_{index}", 2, "Lead", "", "", ""),
+            "Lead_02"
+        );
+        // ...and the default template's base is the index-free legacy base.
+        assert_eq!(
+            template_base(DEFAULT_NAME_TEMPLATE, 7, "Lead", "Ch", "", ""),
+            "Lead"
         );
     }
 
