@@ -43,9 +43,10 @@ pub fn parse_event_spans(buf: &[u8]) -> Result<Vec<(usize, Event<'_>)>, String> 
         return err("file is too small to be an FLP");
     }
     if &buf[0..2] == b"PK" {
-        return err(
-            "this FLP is a ZIP archive (zipped loop package); extract the .flp member first",
-        );
+        // Zip-packed loop packages are unpacked one level up
+        // (`core::flp_inputs`); reaching the FLP parser with a `PK` prefix
+        // means a nested archive (zip-in-zip) or a direct parse call.
+        return err("input is a ZIP archive (zipped loop package), not a plain FLP file");
     }
     if &buf[0..4] != b"FLhd" {
         return err("missing FLhd header (not an FLP file?)");

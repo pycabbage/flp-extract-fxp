@@ -283,6 +283,17 @@ is 33 706 B; L=3 gives 33 660 B, so its producer is roughly a low zstd level).
 Plugin acceptance was **not** tested (no harness run was performed per rules);
 correctness of `md5 hash` + declared size were verified instead.
 
+**Update (real zstd in the converter)**: the converter now emits genuine
+libzstd level-3 frames (`zstd::bulk::compress(data, 3)`, content size
+declared, single-segment frames chosen by libzstd itself: 1/2/4-byte FCS
+depending on body size). These have been **dynamically verified**: every
+converted state of the sample project was accepted by the real plugin via
+`setState` (kResultOk, valid post-state hashes, post-states matching the real
+importer's). Standard frames of any level are accepted; level 3 matches the
+golden states' size class. Frame-header parsing note: for a 1-byte FCS field
+(FCS flag 0 + single segment) the stored byte is the raw size, no offset —
+only the 2-byte field (flag 1) carries a +256 offset.
+
 ## 6. Reproduction pointers
 
 * Container parser/decompressor: `conv_work/scripts/decomp_states.py` (probe dir)

@@ -99,8 +99,9 @@ fn golden_one(nn: u8) {
     let conv = convert_s1_to_s2(&preset, 0).expect("convert");
     let record = crate::serum2state::build_processor_record(&conv.body);
     // Container header must match except the frame md5 (`hash` field):
-    // the golden frame is a real zstd stream, build_processor_record emits
-    // a raw-block frame, so the md5 necessarily differs.
+    // compressed frames are not guaranteed byte-identical across libzstd
+    // builds, so the md5 is not guaranteed to match (it happens to match
+    // with the goldens' level-3 libzstd).
     let (m_json, m_uncomp, m_fmt, foff) = crate::serum2state::parse_xfer_json(&record).unwrap();
     let (w_json, w_uncomp, w_fmt, woff) = crate::serum2state::parse_xfer_json(&want).unwrap();
     let strip = |j: &str| -> String {

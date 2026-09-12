@@ -12,8 +12,11 @@ use std::ops::Range;
 
 use crate::core::{display_name, text};
 use crate::flp;
+use crate::fxp;
 use crate::s1state;
+use crate::s2tree;
 use crate::serum;
+use crate::serum2preset;
 use crate::serum2state;
 
 /// 16-byte Serum2 plugin UID for top-level cid 52 (doc §2.6):
@@ -206,6 +209,127 @@ fn json_string_field(json: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Standalone .fxp -> Serum2 preset conversion
+// ---------------------------------------------------------------------------
+
+/// One successfully converted standalone Serum `.fxp` (see
+/// [`convert_fxp_bytes`]).
+#[derive(Debug, Clone)]
+pub struct ConvertedFxp {
+    pub preset_name: String,
+    pub author: String,
+    pub category: String,
+    pub version_f32: f32,
+    /// Decompressed Serum preset-state size on the input side.
+    pub state_size: usize,
+    /// Number of zlib streams in the chunk (1 = state, +1 per embedded
+    /// wavetable/noise stream).
+    pub stream_count: usize,
+    /// Full XferJson processor record — byte-identical to the inner cid-3
+    /// payload the FLP flow embeds for the same preset.
+    pub processor_record: Vec<u8>,
+    /// `.SerumPreset` container (EXPERIMENTAL output, see
+    /// `serum2preset`): the processor-state CBOR body wrapped in the
+    /// preset-style container, not the authored preset format.
+    pub serum_preset: Vec<u8>,
+    /// Uncompressed CBOR body length (declared by both containers).
+    pub body_cbor_len: usize,
+    /// Non-fatal notes: fxp container warnings + importer conversion notes.
+    pub notes: Vec<String>,
+}
+
+/// Convert one standalone Serum `.fxp` preset into a Serum2 preset.
+///
+/// Reuses the exact pieces of the FLP conversion pipeline: chunk extraction
+/// (`serum::serum1_chunk_from_state`, i.e. chunkSize BE32@0x38 +
+/// `file[0x3C..0x3C+cs]`), `s1state::parse_preset`,
+/// `importer::convert_s1_to_s2(preset, 0)` (the same call the FLP flow's
+/// `RealSource` makes) and `serum2state::build_processor_record`. The
+/// produced processor record is therefore byte-identical to the one the FLP
+/// flow embeds for the same preset.
+///
+/// The `.SerumPreset` container wraps the SAME zstd frame (the converted
+/// processor-state CBOR body, as-is) with a preset-style JSON header. This is
+/// the processor-state variant of the container, not Serum2's authored preset
+/// format — see `serum2preset` and docs/flp-conversion.md ("convert-fxp").
+pub fn convert_fxp_bytes(fxp: &[u8]) -> Result<ConvertedFxp, String> {
+    // 1. Container validation — the same rules `validate` reports and the
+    //    Serum2 importer enforces; fatals abort, warnings become notes.
+    let report = fxp::validate_fxp(fxp);
+    let mut notes: Vec<String> = report.warnings().map(str::to_string).collect();
+    if !report.is_ok() {
+        let mut msg = String::from("fxp failed Serum2 import validation");
+        for f in report.fatals() {
+            msg.push_str(&format!("\n  {f}"));
+        }
+        return Err(msg);
+    }
+
+    // 2. Chunk extraction + metadata (shared with the FLP flow).
+    let chunk = serum::serum1_chunk_from_state(fxp)?;
+    let preset = s1state::parse_preset(&chunk.chunk)?;
+    let meta = preset.meta.clone();
+
+    // 3. Conversion (flag 0 = synth import, same as the FLP flow).
+    let converted = crate::importer::convert_s1_to_s2(&preset, 0)?;
+    notes.extend(converted.report.notes.iter().cloned());
+
+    // 4. Processor record + self-check (md5/size sanity).
+    let processor_record = serum2state::build_processor_record(&converted.body);
+    let (json, uncomp, format, frame_start) = serum2state::parse_xfer_json(&processor_record)?;
+    let frame = &processor_record[frame_start..];
+    if format != 2 {
+        return Err(format!("processor record format is {format}, expected 2"));
+    }
+    let frame_body = s2tree::zstd_frame_body_len(frame).unwrap_or(0);
+    if frame_body != uncomp as usize {
+        return Err(format!(
+            "processor record body length mismatch (frame {frame_body} B, declared {uncomp} B)"
+        ));
+    }
+    if !json.contains(&format!("\"hash\":\"{}\"", serum2state::md5_hex(frame))) {
+        return Err("processor record hash does not match its frame".into());
+    }
+
+    // 5. `.SerumPreset` container: same frame, preset-style header.
+    //    Voicing tag from Global0's mono toggle (badge is always "Wavetable"
+    //    for Serum presets; the factory corpus uses [badge, voicing, ...]).
+    let mono = converted
+        .body
+        .get("Global0")
+        .and_then(|g| g.get("plainParams"))
+        .and_then(|p| p.get("kParamMonoToggle"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        != 0.0;
+    let tags: Vec<String> = vec![
+        "Wavetable".into(),
+        if mono { "Mono".into() } else { "Poly".into() },
+    ];
+    let serum_preset = serum2preset::build_preset_container(
+        frame,
+        uncomp,
+        &meta.preset_name,
+        &meta.author,
+        &meta.category,
+        &tags,
+    );
+
+    Ok(ConvertedFxp {
+        preset_name: meta.preset_name,
+        author: meta.author,
+        category: meta.category,
+        version_f32: meta.version_f32,
+        state_size: preset.blob.len(),
+        stream_count: chunk.stream_sizes.len(),
+        processor_record,
+        serum_preset,
+        body_cbor_len: uncomp as usize,
+        notes,
+    })
+}
+
 /// Raw (unquoted) value of a `"key":<token>` field, up to `,` or `}`.
 fn json_raw_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let pat = format!("\"{key}\":");
@@ -394,6 +518,204 @@ pub fn apply(
     let new_dtlen = out.len() - dt_start;
     out[dt_len_pos..dt_len_pos + 4].copy_from_slice(&(new_dtlen as u32).to_le_bytes());
     Ok((out, report))
+}
+
+// ---------------------------------------------------------------------------
+// Metadata patching (Serum instances inside an FLP)
+// ---------------------------------------------------------------------------
+
+/// One patched Serum instance, for the human report.
+#[derive(Debug, Clone)]
+pub struct PatchedInstance {
+    pub channel: Option<u16>,
+    pub channel_name: String,
+    /// Preset name before the patch (may be empty when unreadable).
+    pub old_preset_name: String,
+    /// Preset name after the patch (equals the old one when no Name patch).
+    pub new_preset_name: String,
+}
+
+/// Result of [`patch_serum_metadata`]: what was rewritten plus non-fatal notes.
+#[derive(Debug, Default)]
+pub struct FlpPatchReport {
+    pub patched: Vec<PatchedInstance>,
+    pub warnings: Vec<String>,
+}
+
+/// Patch metadata in every Serum synth instance of an FLP, in memory.
+///
+/// For each Serum instance the inner cid-3 preset chunk is inflated, the
+/// fields are rewritten ([`fxp::patch_chunk_fields`]) and the chunk is
+/// spliced back with fresh record framing and a fixed FLdt u32 length.
+/// Non-plugin events and everything before the FLdt payload stay
+/// byte-identical. Instances whose state cannot be patched are skipped with
+/// a warning (never aborts).
+pub fn patch_serum_metadata(
+    buf: &[u8],
+    patches: &[fxp::PatchField],
+) -> Result<(Vec<u8>, FlpPatchReport), String> {
+    if patches.is_empty() {
+        return Err("nothing to patch (empty patch list)".into());
+    }
+    let spans = flp::parse_event_spans(buf)?;
+    let (_, dt_len_pos, dt_start, _) = locate_chunks(buf)?;
+
+    // Channel bookkeeping identical to scan_convertible_detailed.
+    let mut channels: HashMap<u16, String> = HashMap::new();
+    let mut cur_channel: Option<u16> = None;
+    let mut cur_fx_name = String::new();
+    let mut replacements: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut report = FlpPatchReport::default();
+
+    for (i, (_off, ev)) in spans.iter().enumerate() {
+        match ev.id {
+            flp::EV_NEW_CHANNEL => {
+                if ev.data.len() >= 2 {
+                    cur_channel = Some(u16::from_le_bytes([ev.data[0], ev.data[1]]));
+                }
+            }
+            flp::EV_TEXT_CHANNEL_NAME => {
+                if let Some(ch) = cur_channel {
+                    channels.insert(ch, text(ev.data));
+                }
+            }
+            flp::EV_TEXT_FX_TRACK_NAME => {
+                cur_fx_name = text(ev.data);
+            }
+            flp::EV_PLUGIN_PARAMS => {
+                let Ok(pp) = flp::parse_plugin_params(ev.data) else {
+                    continue;
+                };
+                if serum::is_serum2(pp.name, pp.filename) {
+                    continue;
+                }
+                let where_ = cur_channel
+                    .and_then(|c| channels.get(&c).cloned())
+                    .unwrap_or_else(|| cur_fx_name.clone());
+                if serum::is_serum_fx(pp.name, pp.filename) {
+                    report.warnings.push(format!(
+                        "Serum FX instance on channel '{where_}' left untouched"
+                    ));
+                    continue;
+                }
+                if !serum::is_serum1_synth(pp.name, pp.filename) || pp.state.is_empty() {
+                    continue;
+                }
+                let old_name = serum::serum1_chunk_from_state(pp.state)
+                    .map(|c| c.meta.preset_name)
+                    .unwrap_or_default();
+                let new_payload = match patch_event_payload(ev.data, patches) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        report.warnings.push(format!(
+                            "instance on channel '{}': {e}",
+                            display_name(&where_)
+                        ));
+                        continue;
+                    }
+                };
+                replacements.insert(i, new_payload);
+                let new_name = match patches.iter().rev().find_map(|p| match p {
+                    fxp::PatchField::Name(s) => Some(s.clone()),
+                    _ => None,
+                }) {
+                    Some(s) => {
+                        let mut b = s.as_bytes().to_vec();
+                        b.truncate(31);
+                        while std::str::from_utf8(&b).is_err() {
+                            b.pop();
+                        }
+                        String::from_utf8_lossy(&b).into_owned()
+                    }
+                    None => old_name.clone(),
+                };
+                report.patched.push(PatchedInstance {
+                    channel: cur_channel,
+                    channel_name: where_,
+                    old_preset_name: old_name,
+                    new_preset_name: new_name,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Splice: everything before the FLdt payload verbatim, re-emit each
+    // event (replaced ones with fresh framing), then fix the FLdt length.
+    let mut out: Vec<u8> = Vec::with_capacity(buf.len() + 4096);
+    out.extend_from_slice(&buf[..dt_start]);
+    for (i, (_off, ev)) in spans.iter().enumerate() {
+        match replacements.get(&i) {
+            Some(new_payload) => {
+                out.push(flp::EV_PLUGIN_PARAMS);
+                push_varint(&mut out, new_payload.len());
+                out.extend_from_slice(new_payload);
+            }
+            None => {
+                let pstart = ev.data.as_ptr() as usize - buf.as_ptr() as usize;
+                out.extend_from_slice(&buf[*_off..pstart + ev.data.len()]);
+            }
+        }
+    }
+    let new_dtlen = out.len() - dt_start;
+    out[dt_len_pos..dt_len_pos + 4].copy_from_slice(&(new_dtlen as u32).to_le_bytes());
+    Ok((out, report))
+}
+
+/// Replace the inner cid-3 chunk of a PluginParams payload with its patched
+/// version; every other record and the record order stay verbatim.
+fn patch_event_payload(orig: &[u8], patches: &[fxp::PatchField]) -> Result<Vec<u8>, String> {
+    if orig.len() < 4 {
+        return Err("PluginParams payload too small".into());
+    }
+    let version = u32::from_le_bytes(orig[0..4].try_into().unwrap());
+    if version < 5 {
+        return Err(format!(
+            "PluginParams version {version} predates the chunked layout"
+        ));
+    }
+    let recs = parse_record_seq(orig, 4)?;
+    let Some(cid53) = record_data(orig, &recs, 53) else {
+        return Err("missing cid 53 record".into());
+    };
+    // The FL VST3 wrapper is [u32 prologue][records...] — find the record
+    // start the same way serum::fl_vst3_wrapper_cid3 does.
+    let mut wstart = None;
+    for s in 0..=8usize {
+        if cid53.len() >= s && parse_record_seq(cid53, s).is_ok() {
+            wstart = Some(s);
+            break;
+        }
+    }
+    let Some(wstart) = wstart else {
+        return Err("cid 53 wrapper records do not parse".into());
+    };
+    let wrecs = parse_record_seq(cid53, wstart)?;
+    let Some(inner3) = record_data(cid53, &wrecs, 3) else {
+        return Err("missing inner cid 3 record".into());
+    };
+    let new_cid3 = fxp::patch_chunk_fields(inner3, patches)?;
+    let mut w = Vec::with_capacity(wstart + cid53.len() + new_cid3.len());
+    w.extend_from_slice(&cid53[..wstart]);
+    for r in &wrecs {
+        let data = if r.cid == 3 {
+            &new_cid3
+        } else {
+            &cid53[r.data.clone()]
+        };
+        push_rec(&mut w, r.cid, data);
+    }
+    let mut p = Vec::with_capacity(orig.len() + new_cid3.len());
+    p.extend_from_slice(&version.to_le_bytes());
+    for r in &recs {
+        let data = if r.cid == 53 {
+            &w
+        } else {
+            &orig[r.data.clone()]
+        };
+        push_rec(&mut p, r.cid, data);
+    }
+    Ok(p)
 }
 
 // ---------------------------------------------------------------------------
@@ -591,10 +913,9 @@ mod tests {
             .copy_from_slice(&0.1631f32.to_le_bytes());
         let z0 = zlib_stream(&s0);
         let z1 = zlib_stream(&[0u8; 8192]);
-        let mut v = z0;
+        let mut v = z0.clone();
         v.extend_from_slice(&z1);
-        let z0_len = v.len() - z1.len() - 4;
-        v.extend_from_slice(&(z0_len as u32).to_le_bytes());
+        v.extend_from_slice(&(z0.len() as u32).to_le_bytes());
         v
     }
 
@@ -1042,5 +1363,212 @@ mod tests {
             "{}",
             src.warnings[0]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // convert_fxp_bytes (standalone .fxp -> Serum2 preset)
+    // -----------------------------------------------------------------------
+
+    fn fixture_base() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    }
+
+    fn read_fixture(nn: u8, what: &str) -> Option<Vec<u8>> {
+        match std::fs::read(fixture_base().join(what.replace("{nn}", &format!("0{nn}")))) {
+            Ok(b) => Some(b),
+            Err(_) => {
+                eprintln!(
+                    "skipping preset {nn}: untracked fixtures absent ({what}; docs/flp-conversion.md)"
+                );
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn convert_fxp_matches_flp_flow_processor_record() {
+        let Some(flp) = read_fixture(0, "serina1.flp") else {
+            return;
+        };
+        let (plans, _) = scan_convertible_detailed(&flp).unwrap();
+        assert_eq!(plans.len(), 5);
+        let mut source = RealSource::embedded();
+        let mut flow: HashMap<String, Vec<u8>> = HashMap::new();
+        for plan in &plans {
+            let bundle = source
+                .bundle_for(plan, &[])
+                .unwrap()
+                .expect("bundle for a modern preset");
+            flow.insert(plan.preset_name.clone(), bundle.processor_record);
+        }
+        for nn in 1..=5u8 {
+            let Some(bytes) = read_fixture(nn, "serina1/{nn}.fxp") else {
+                continue;
+            };
+            let c = convert_fxp_bytes(&bytes).unwrap_or_else(|e| panic!("preset {nn}: {e}"));
+            let rec = flow
+                .get(&c.preset_name)
+                .unwrap_or_else(|| panic!("preset '{}' missing from the FLP flow", c.preset_name));
+            assert_eq!(
+                &c.processor_record, rec,
+                "preset {nn} ({}) processor record differs from the FLP flow",
+                c.preset_name
+            );
+        }
+    }
+
+    #[test]
+    fn convert_fxp_container_parse_back_and_golden_body() {
+        for nn in 1..=5u8 {
+            let Some(bytes) = read_fixture(nn, "serina1/{nn}.fxp") else {
+                continue;
+            };
+            let c = convert_fxp_bytes(&bytes).unwrap_or_else(|e| panic!("preset {nn}: {e}"));
+            assert!(c.notes.is_empty(), "preset {nn}: {:?}", c.notes);
+
+            // Container parse-back: header fields + hash == md5(frame).
+            let (json, uncomp, format, foff) =
+                serum2state::parse_xfer_json(&c.serum_preset).unwrap();
+            assert_eq!(format, 2);
+            assert_eq!(uncomp as usize, c.body_cbor_len);
+            assert!(json.contains("\"fileType\":\"SerumPreset\""), "{json}");
+            assert!(json.contains("\"product\":\"Serum2\""), "{json}");
+            assert!(json.contains("\"version\":9.0"), "{json}");
+            assert!(
+                json.contains(&format!("\"presetName\":\"{}\"", c.preset_name)),
+                "{json}"
+            );
+            let frame = &c.serum_preset[foff..];
+            assert_eq!(
+                json.contains(&format!("\"hash\":\"{}\"", serum2state::md5_hex(frame))),
+                true,
+                "{json}"
+            );
+
+            // The preset body IS the processor record's frame, as-is.
+            let (_, _, _, proc_foff) = serum2state::parse_xfer_json(&c.processor_record).unwrap();
+            assert_eq!(frame, &c.processor_record[proc_foff..]);
+
+            // And its decoded CBOR equals the REAL importer's golden body.
+            if let Some(golden) = read_fixture(nn, "golden_s2/{nn}_processor_state.bin") {
+                let (_, _, _, gfoff) = serum2state::parse_xfer_json(&golden).unwrap();
+                assert_eq!(
+                    crate::testutil::decode_zstd_frame(frame),
+                    crate::testutil::decode_zstd_frame(&golden[gfoff..]),
+                    "preset {nn} body differs from the real importer golden"
+                );
+            }
+        }
+    }
+    /// Pull the inner cid-3 chunk out of a PluginParams payload (test-local).
+    fn inner_cid3(payload: &[u8]) -> Vec<u8> {
+        let recs = records_of(payload, 4);
+        let w = &recs.iter().find(|r| r.0 == 53).unwrap().1;
+        records_of(w, 4).into_iter().find(|r| r.0 == 3).unwrap().1
+    }
+
+    #[test]
+    fn patch_flp_updates_state_and_report() {
+        let buf = sample_flp();
+        let (out, rep) = patch_serum_metadata(
+            &buf,
+            &[
+                fxp::PatchField::Name("Patched Name".into()),
+                fxp::PatchField::Author("Patched Author".into()),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(rep.patched.len(), 1);
+        assert_eq!(rep.patched[0].channel_name, "Serum");
+        assert_eq!(rep.patched[0].old_preset_name, "TestPreset");
+        assert_eq!(rep.patched[0].new_preset_name, "Patched Name");
+        assert!(rep.warnings.is_empty());
+
+        // FLdt length correct, header prefix untouched.
+        assert_eq!(fldt_len(&out), out.len() - 22);
+        assert_eq!(&out[..18], &buf[..18]);
+
+        // Non-plugin events byte-identical.
+        let evs_old = flp::parse_events(&buf).unwrap();
+        let evs_new = flp::parse_events(&out).unwrap();
+        assert_eq!(evs_old.len(), evs_new.len());
+        for (o, n) in evs_old.iter().zip(&evs_new) {
+            if o.id == flp::EV_PLUGIN_PARAMS {
+                continue;
+            }
+            assert_eq!((o.id, &o.data), (n.id, &n.data));
+        }
+
+        // The patched state carries the new metadata.
+        let state = crate::zlibio::inflate(&inner_cid3(evs_new[2].data), 1 << 20)
+            .unwrap()
+            .0;
+        let field = |off: usize, len: usize| {
+            String::from_utf8_lossy(&state[off..off + len])
+                .trim_end_matches('\0')
+                .to_string()
+        };
+        assert_eq!(field(serum::OFF_PRESET_NAME, 32), "Patched Name");
+        assert_eq!(field(serum::OFF_AUTHOR, 48), "Patched Author");
+        assert_eq!(field(serum::OFF_CATEGORY, 48), "");
+    }
+
+    #[test]
+    fn patch_flp_keeps_other_records_byte_identical() {
+        let buf = sample_flp();
+        let (out, _) =
+            patch_serum_metadata(&buf, &[fxp::PatchField::Category("Cat".into())]).unwrap();
+        let old = flp::parse_events(&buf).unwrap();
+        let new = flp::parse_events(&out).unwrap();
+        let po = records_of(old[2].data, 4);
+        let pn = records_of(new[2].data, 4);
+        // Same record sequence; only cid 53 differs (its inner cid-3 chunk
+        // was rebuilt).
+        assert_eq!(
+            po.iter().map(|r| r.0).collect::<Vec<_>>(),
+            pn.iter().map(|r| r.0).collect::<Vec<_>>()
+        );
+        for (o, n) in po.iter().zip(&pn) {
+            if o.0 == 53 {
+                // Inside the wrapper, only the inner cid-3 chunk differs.
+                let wo = records_of(&o.1, 4);
+                let wn = records_of(&n.1, 4);
+                assert_eq!(
+                    wo.iter().map(|r| r.0).collect::<Vec<_>>(),
+                    wn.iter().map(|r| r.0).collect::<Vec<_>>()
+                );
+                for (a, b) in wo.iter().zip(&wn) {
+                    if a.0 == 3 {
+                        continue;
+                    }
+                    assert_eq!(a.1, b.1, "wrapper cid {} changed", a.0);
+                }
+            } else {
+                assert_eq!(o.1, n.1, "record cid {} changed", o.0);
+                assert_eq!(o.1, n.1, "record cid {} changed", o.0);
+            }
+        }
+    }
+
+    #[test]
+    fn patch_flp_empty_patches_rejected() {
+        assert!(patch_serum_metadata(&sample_flp(), &[]).is_err());
+    }
+
+    #[test]
+    fn patch_flp_serum_fx_warns_and_skips() {
+        let buf = build_flp(&[
+            (EV_NEW_CHANNEL, vec![3, 0]),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                serum1_payload("Serum FX", "/Library/Audio/Plug-Ins/VST3/Serum FX.vst3"),
+            ),
+        ]);
+        let (out, rep) = patch_serum_metadata(&buf, &[fxp::PatchField::Name("X".into())]).unwrap();
+        assert_eq!(out, buf);
+        assert!(rep.patched.is_empty());
+        assert_eq!(rep.warnings.len(), 1);
+        assert!(rep.warnings[0].contains("Serum FX"));
     }
 }
