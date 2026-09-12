@@ -6,6 +6,7 @@ FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum
 - Serum2 の Serum インポートチェック (静的逆解析、下記参照) を満たす fxp を生成
 - 書き出し前にバリデーションし、Serum2 が拒否するファイルは既定で出力しない
 - `convert`: FLP 内の Serum インスタンスを変換済み Serum2 インスタンスに書き換えた FLP を生成 (下記参照)
+- `patch`: fxp (または FLP 内の全 Serum インスタンス) のプリセット名 / 作者 / カテゴリを書き換え (下記参照)
 
 ## ビルド
 
@@ -70,6 +71,24 @@ FLP 内の Serum (シンセ) インスタンスごとにプリセット状態を
 
 再生には実際の Serum2 (VST3) のインストールが必要です。Web UI にも同じ変換があり、「Convert to Serum2」ボタンでブラウザ内で変換し `<名前>-serum2.flp` としてダウンロードできます。パイプラインと検証方法の詳細は [docs/flp-conversion.md](docs/flp-conversion.md) を参照してください。
 
+### `patch` — プリセットメタデータの書き換え
+
+```sh
+flp-extract-fxp patch preset.fxp --name "New Name"
+flp-extract-fxp patch preset.fxp --name "New Name" --author "Me" --category "Bass" --out renamed.fxp
+flp-extract-fxp patch --dry-run --name "New Name" preset.fxp
+flp-extract-fxp patch project.flp --name "New Name" --out renamed.flp
+```
+
+| フラグ | 意味 |
+|---|---|
+| `--name` | 新プリセット名。ヘッダの `prgName` (28 バイト) と状態内の名前フィールド (0x4972、32 バイト) の**両方**に書き込む |
+| `--author` | 新作者文字列 (状態内 0x49A0、48 バイト) |
+| `--category` | 新カテゴリ文字列 (状態内 0x49D0、48 バイト) |
+| `-o`, `--out <FILE>` | 出力パス。省略時は入力ファイルをその場で書き換え (一時ファイル + リネームのアトミック書き込み)。FLP の場合は必須 (プロジェクトの事故上書き防止) |
+| `--dry-run` | 変更内容 (旧値 → 新値) を表示して書き込まない |
+
+書き換えは状態ストリーム 0 を展開 → 対象フィールドを上書き → zlib レベル 1 (Serum 実物と同じ) で再圧縮 → トレーラ / `chunkSize` / `byteSize` を再計算、で行い、それ以外のバイトは一切変えません。長い名前は UTF-8 文字境界で切り詰めます。書き込み前に `validate` と同じ規則で結果を検査し、FAIL 時は書き込みません。名前の書き込み位置の仕様は [docs/serum-fxp-format.md](docs/serum-fxp-format.md) §4 を参照してください。FLP 入力の場合はプロジェクト内の全 Serum (シンセ) インスタンスを同じ要領で書き換えます (Serum FX は対象外、イベント 213 の cid 3 チャンクを差し替えて FLdt 長を修正)。
 ### `--json` — 機械可読出力 (全サブコマンド共通)
 
 ```sh
@@ -83,6 +102,7 @@ flp-extract-fxp list --json "path/to/project.flp"
 - 中断を伴う致命的エラー (入力ファイルが読めない、FLP として解析不能など) では `{"error": "..."}` のみを stdout に出し、終了コード 1 で終わります
 
 `--json` を付けない場合の出力は従来通りです。
+
 
 ## 出力ファイル名
 

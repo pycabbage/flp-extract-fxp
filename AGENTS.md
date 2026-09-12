@@ -38,16 +38,21 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
   `ruzstd` is a dev-dependency (test-only zstd decoding). Keep new
   dependencies wasm32-safe
   — the conversion stack must compile identically for both targets.
-- CLI subcommands: `list`, `extract`, `validate`, and
+- CLI subcommands: `list`, `extract`, `validate`,
   `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum instances
-  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`). Every
-  subcommand takes `--json`: stdout then carries exactly one JSON document
-  (the structured report from `src/report.rs`, camelCase keys aligned with
-  the wasm report fields), human-readable progress moves to stderr, and a
-  command that completes but fails still prints its full report with an
-  embedded `"error"` field before exiting 1 (aborting errors print
-  `{"error": "..."}` instead). Without `--json` the historical output is
-  unchanged.
+  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`), and
+  `patch <input.fxp|.flp> [--name|--author|--category] [--out] [--dry-run]`
+  (rewrites preset metadata in an fxp or in every Serum instance of an FLP;
+  name goes to prgName@0x1C AND state@0x4972, stream 0 is recompressed at
+  zlib level 1, trailer/chunkSize/byteSize recomputed — `src/fxp.rs`
+  `patch_metadata`/`patch_chunk_fields`, FLP path `src/flpconv.rs`
+  `patch_serum_metadata`). Every subcommand takes `--json`: stdout then
+  carries exactly one JSON document (the structured report from
+  `src/report.rs`, camelCase keys aligned with the wasm report fields),
+  human-readable progress moves to stderr, and a command that completes but
+  fails still prints its full report with an embedded `"error"` field before
+  exiting 1 (aborting errors print `{"error": "..."}` instead). Without
+  `--json` the historical output is unchanged.
 
 ## Frontend + wasm (`front/`)
 

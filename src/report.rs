@@ -64,6 +64,28 @@ pub struct PresetEntry {
     pub errors: Vec<String>,
 }
 
+/// Result of `patch`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchReport {
+    /// Input path as given on the command line.
+    pub input: String,
+    /// Output path written (or planned under `--dry-run`).
+    pub output: String,
+    /// True under `--dry-run` (no write performed).
+    pub dry_run: bool,
+    /// Patched Serum instances (1 for a standalone .fxp; the FLP path reports
+    /// every rewritten instance).
+    pub patched: u32,
+    /// Warnings collected while re-validating the patched output.
+    pub warnings: Vec<String>,
+}
+
+impl CommandReport for PatchReport {
+    fn error(&self) -> Option<&str> {
+        None
+    }
+}
 /// Per-input result of `list`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
