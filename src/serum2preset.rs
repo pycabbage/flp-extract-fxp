@@ -145,7 +145,7 @@ mod tests {
         let mut body = Val::obj();
         body.set("presetName", Val::Text("X".into()));
         let proc_rec = build_processor_record(&body);
-        let (json, uncomp, format, foff) = crate::serum2state::parse_xfer_json(&proc_rec).unwrap();
+        let (_json, uncomp, format, foff) = crate::serum2state::parse_xfer_json(&proc_rec).unwrap();
         assert_eq!(format, 2);
 
         let preset = build_preset_container(
