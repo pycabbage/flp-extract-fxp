@@ -14,7 +14,9 @@ use crate::core::{display_name, text};
 use crate::flp;
 use crate::fxp;
 use crate::s1state;
+use crate::s2tree;
 use crate::serum;
+use crate::serum2preset;
 use crate::serum2state;
 
 /// 16-byte Serum2 plugin UID for top-level cid 52 (doc §2.6):
@@ -205,6 +207,127 @@ fn json_string_field(json: &str, key: &str) -> Option<String> {
     let rest = &json[start..];
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Standalone .fxp -> Serum2 preset conversion
+// ---------------------------------------------------------------------------
+
+/// One successfully converted standalone Serum `.fxp` (see
+/// [`convert_fxp_bytes`]).
+#[derive(Debug, Clone)]
+pub struct ConvertedFxp {
+    pub preset_name: String,
+    pub author: String,
+    pub category: String,
+    pub version_f32: f32,
+    /// Decompressed Serum preset-state size on the input side.
+    pub state_size: usize,
+    /// Number of zlib streams in the chunk (1 = state, +1 per embedded
+    /// wavetable/noise stream).
+    pub stream_count: usize,
+    /// Full XferJson processor record — byte-identical to the inner cid-3
+    /// payload the FLP flow embeds for the same preset.
+    pub processor_record: Vec<u8>,
+    /// `.SerumPreset` container (EXPERIMENTAL output, see
+    /// `serum2preset`): the processor-state CBOR body wrapped in the
+    /// preset-style container, not the authored preset format.
+    pub serum_preset: Vec<u8>,
+    /// Uncompressed CBOR body length (declared by both containers).
+    pub body_cbor_len: usize,
+    /// Non-fatal notes: fxp container warnings + importer conversion notes.
+    pub notes: Vec<String>,
+}
+
+/// Convert one standalone Serum `.fxp` preset into a Serum2 preset.
+///
+/// Reuses the exact pieces of the FLP conversion pipeline: chunk extraction
+/// (`serum::serum1_chunk_from_state`, i.e. chunkSize BE32@0x38 +
+/// `file[0x3C..0x3C+cs]`), `s1state::parse_preset`,
+/// `importer::convert_s1_to_s2(preset, 0)` (the same call the FLP flow's
+/// `RealSource` makes) and `serum2state::build_processor_record`. The
+/// produced processor record is therefore byte-identical to the one the FLP
+/// flow embeds for the same preset.
+///
+/// The `.SerumPreset` container wraps the SAME zstd frame (the converted
+/// processor-state CBOR body, as-is) with a preset-style JSON header. This is
+/// the processor-state variant of the container, not Serum2's authored preset
+/// format — see `serum2preset` and docs/flp-conversion.md ("convert-fxp").
+pub fn convert_fxp_bytes(fxp: &[u8]) -> Result<ConvertedFxp, String> {
+    // 1. Container validation — the same rules `validate` reports and the
+    //    Serum2 importer enforces; fatals abort, warnings become notes.
+    let report = fxp::validate_fxp(fxp);
+    let mut notes: Vec<String> = report.warnings().map(str::to_string).collect();
+    if !report.is_ok() {
+        let mut msg = String::from("fxp failed Serum2 import validation");
+        for f in report.fatals() {
+            msg.push_str(&format!("\n  {f}"));
+        }
+        return Err(msg);
+    }
+
+    // 2. Chunk extraction + metadata (shared with the FLP flow).
+    let chunk = serum::serum1_chunk_from_state(fxp)?;
+    let preset = s1state::parse_preset(&chunk.chunk)?;
+    let meta = preset.meta.clone();
+
+    // 3. Conversion (flag 0 = synth import, same as the FLP flow).
+    let converted = crate::importer::convert_s1_to_s2(&preset, 0)?;
+    notes.extend(converted.report.notes.iter().cloned());
+
+    // 4. Processor record + self-check (md5/size sanity).
+    let processor_record = serum2state::build_processor_record(&converted.body);
+    let (json, uncomp, format, frame_start) = serum2state::parse_xfer_json(&processor_record)?;
+    let frame = &processor_record[frame_start..];
+    if format != 2 {
+        return Err(format!("processor record format is {format}, expected 2"));
+    }
+    let frame_body = s2tree::zstd_frame_body_len(frame).unwrap_or(0);
+    if frame_body != uncomp as usize {
+        return Err(format!(
+            "processor record body length mismatch (frame {frame_body} B, declared {uncomp} B)"
+        ));
+    }
+    if !json.contains(&format!("\"hash\":\"{}\"", serum2state::md5_hex(frame))) {
+        return Err("processor record hash does not match its frame".into());
+    }
+
+    // 5. `.SerumPreset` container: same frame, preset-style header.
+    //    Voicing tag from Global0's mono toggle (badge is always "Wavetable"
+    //    for Serum presets; the factory corpus uses [badge, voicing, ...]).
+    let mono = converted
+        .body
+        .get("Global0")
+        .and_then(|g| g.get("plainParams"))
+        .and_then(|p| p.get("kParamMonoToggle"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        != 0.0;
+    let tags: Vec<String> = vec![
+        "Wavetable".into(),
+        if mono { "Mono".into() } else { "Poly".into() },
+    ];
+    let serum_preset = serum2preset::build_preset_container(
+        frame,
+        uncomp,
+        &meta.preset_name,
+        &meta.author,
+        &meta.category,
+        &tags,
+    );
+
+    Ok(ConvertedFxp {
+        preset_name: meta.preset_name,
+        author: meta.author,
+        category: meta.category,
+        version_f32: meta.version_f32,
+        state_size: preset.blob.len(),
+        stream_count: chunk.stream_sizes.len(),
+        processor_record,
+        serum_preset,
+        body_cbor_len: uncomp as usize,
+        notes,
+    })
 }
 
 /// Raw (unquoted) value of a `"key":<token>` field, up to `,` or `}`.
@@ -1242,6 +1365,101 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // convert_fxp_bytes (standalone .fxp -> Serum2 preset)
+    // -----------------------------------------------------------------------
+
+    fn fixture_base() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    }
+
+    fn read_fixture(nn: u8, what: &str) -> Option<Vec<u8>> {
+        match std::fs::read(fixture_base().join(what.replace("{nn}", &format!("0{nn}")))) {
+            Ok(b) => Some(b),
+            Err(_) => {
+                eprintln!(
+                    "skipping preset {nn}: untracked fixtures absent ({what}; docs/flp-conversion.md)"
+                );
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn convert_fxp_matches_flp_flow_processor_record() {
+        let Some(flp) = read_fixture(0, "serina1.flp") else {
+            return;
+        };
+        let (plans, _) = scan_convertible_detailed(&flp).unwrap();
+        assert_eq!(plans.len(), 5);
+        let mut source = RealSource::embedded();
+        let mut flow: HashMap<String, Vec<u8>> = HashMap::new();
+        for plan in &plans {
+            let bundle = source
+                .bundle_for(plan, &[])
+                .unwrap()
+                .expect("bundle for a modern preset");
+            flow.insert(plan.preset_name.clone(), bundle.processor_record);
+        }
+        for nn in 1..=5u8 {
+            let Some(bytes) = read_fixture(nn, "serina1/{nn}.fxp") else {
+                continue;
+            };
+            let c = convert_fxp_bytes(&bytes).unwrap_or_else(|e| panic!("preset {nn}: {e}"));
+            let rec = flow
+                .get(&c.preset_name)
+                .unwrap_or_else(|| panic!("preset '{}' missing from the FLP flow", c.preset_name));
+            assert_eq!(
+                &c.processor_record, rec,
+                "preset {nn} ({}) processor record differs from the FLP flow",
+                c.preset_name
+            );
+        }
+    }
+
+    #[test]
+    fn convert_fxp_container_parse_back_and_golden_body() {
+        for nn in 1..=5u8 {
+            let Some(bytes) = read_fixture(nn, "serina1/{nn}.fxp") else {
+                continue;
+            };
+            let c = convert_fxp_bytes(&bytes).unwrap_or_else(|e| panic!("preset {nn}: {e}"));
+            assert!(c.notes.is_empty(), "preset {nn}: {:?}", c.notes);
+
+            // Container parse-back: header fields + hash == md5(frame).
+            let (json, uncomp, format, foff) =
+                serum2state::parse_xfer_json(&c.serum_preset).unwrap();
+            assert_eq!(format, 2);
+            assert_eq!(uncomp as usize, c.body_cbor_len);
+            assert!(json.contains("\"fileType\":\"SerumPreset\""), "{json}");
+            assert!(json.contains("\"product\":\"Serum2\""), "{json}");
+            assert!(json.contains("\"version\":9.0"), "{json}");
+            assert!(
+                json.contains(&format!("\"presetName\":\"{}\"", c.preset_name)),
+                "{json}"
+            );
+            let frame = &c.serum_preset[foff..];
+            assert_eq!(
+                json.contains(&format!("\"hash\":\"{}\"", serum2state::md5_hex(frame))),
+                true,
+                "{json}"
+            );
+
+            // The preset body IS the processor record's frame, as-is.
+            let (_, _, _, proc_foff) = serum2state::parse_xfer_json(&c.processor_record).unwrap();
+            assert_eq!(frame, &c.processor_record[proc_foff..]);
+
+            // And its decoded CBOR equals the REAL importer's golden body.
+            if let Some(golden) = read_fixture(nn, "golden_s2/{nn}_processor_state.bin") {
+                let (_, _, _, gfoff) = serum2state::parse_xfer_json(&golden).unwrap();
+                assert_eq!(
+                    crate::testutil::decode_zstd_frame(frame),
+                    crate::testutil::decode_zstd_frame(&golden[gfoff..]),
+                    "preset {nn} body differs from the real importer golden"
+                );
+            }
+        }
+    }
     /// Pull the inner cid-3 chunk out of a PluginParams payload (test-local).
     fn inner_cid3(payload: &[u8]) -> Vec<u8> {
         let recs = records_of(payload, 4);
@@ -1327,6 +1545,7 @@ mod tests {
                     assert_eq!(a.1, b.1, "wrapper cid {} changed", a.0);
                 }
             } else {
+                assert_eq!(o.1, n.1, "record cid {} changed", o.0);
                 assert_eq!(o.1, n.1, "record cid {} changed", o.0);
             }
         }

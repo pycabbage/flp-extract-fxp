@@ -28,6 +28,9 @@
 //!   (never hand-edit; provenance in docs/s2-runtime-tables.md).
 //! - [`s2tree`]: deterministic CBOR value tree + zstd frames.
 //! - [`serum2state`]: Serum2 `XferJson` container assembly and parsing.
+//! - [`serum2preset`]: `.SerumPreset` output container assembly
+//!   (EXPERIMENTAL — wraps the converted processor-state body; see the
+//!   module docs).
 //! - `web`: `wasm-bindgen` bindings; only compiled when targeting
 //!   `wasm32-unknown-unknown` (cfg-gated, so native builds never link it).
 //! - `testutil`: `#[cfg(test)]` helpers shared by crate-internal tests.
@@ -45,6 +48,7 @@ pub mod importer;
 pub mod s1state;
 pub mod s2tables;
 pub mod s2tree;
+pub mod serum2preset;
 pub mod serum2state;
 
 #[cfg(test)]

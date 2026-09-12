@@ -92,6 +92,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Convert standalone Serum .fxp presets into Serum2 .SerumPreset files.
+    ConvertFxp {
+        /// Serum .fxp preset files to process.
+        inputs: Vec<PathBuf>,
+        /// Output directory (default: alongside each input).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Overwrite existing output files.
+        #[arg(long)]
+        overwrite: bool,
+        /// Print the result as a single JSON document on stdout.
+        #[arg(long)]
+        json: bool,
+    },
     /// Patch preset metadata in a Serum .fxp file (or in every Serum
     /// instance of an FLP project).
     Patch {
@@ -961,6 +975,84 @@ fn run_patch_flp(
     ))
 }
 
+/// Convert standalone Serum .fxp presets into Serum2 .SerumPreset files.
+/// Abort-on-error semantics like `run_convert`: the first input that fails
+/// validation or conversion stops the run with an error.
+fn run_convert_fxp(
+    inputs: &[PathBuf],
+    out: Option<&PathBuf>,
+    overwrite: bool,
+    report_out: &Out,
+) -> Result<ConvertReport, String> {
+    let mut total = 0u32;
+    let mut input_reports: Vec<ConvertInputReport> = Vec::new();
+    for (k, input) in inputs.iter().enumerate() {
+        let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+        let c =
+            flpconv::convert_fxp_bytes(&buf).map_err(|e| format!("{}: {e}", input.display()))?;
+        for n in &c.notes {
+            report_out.line(&format!("warning: {n}"));
+        }
+        let out_dir = match out {
+            Some(o) => o.clone(),
+            None => input
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from(".")),
+        };
+        std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
+        let stem = input
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "preset".into());
+        let path = out_dir.join(format!("{}.SerumPreset", sanitize_filename(&stem)));
+        if path.exists() && !overwrite {
+            report_out.line(&format!(
+                "{} exists, skipped (use --overwrite)",
+                path.display()
+            ));
+            input_reports.push(ConvertInputReport {
+                input: input.display().to_string(),
+                dry_run: false,
+                output: None,
+                output_bytes: None,
+                converted_count: 0,
+                details: Vec::new(),
+                warnings: c.notes.clone(),
+            });
+            continue;
+        }
+        std::fs::write(&path, &c.serum_preset).map_err(|e| format!("{}: {e}", path.display()))?;
+        total += 1;
+        report_out.line(&format!(
+            "[{:02}] preset '{}' (state {}, {} stream(s), ver {:.4}) -> converted (body {} B) => {}",
+            k + 1,
+            if c.preset_name.is_empty() { "-" } else { &c.preset_name },
+            format_bytes(c.state_size),
+            c.stream_count,
+            c.version_f32,
+            c.body_cbor_len,
+            path.display(),
+        ));
+        input_reports.push(ConvertInputReport {
+            input: input.display().to_string(),
+            dry_run: false,
+            output: Some(path.display().to_string()),
+            output_bytes: Some(c.serum_preset.len()),
+            converted_count: 1,
+            details: Vec::new(),
+            warnings: c.notes.clone(),
+        });
+    }
+    if total == 0 {
+        return Err("no presets converted".into());
+    }
+    Ok(ConvertReport {
+        inputs: input_reports,
+        converted_count: total,
+        error: None,
+    })
+}
 fn main() {
     let cli = Cli::parse();
     let json = match &cli.command {
@@ -968,6 +1060,7 @@ fn main() {
         | Command::Extract { json, .. }
         | Command::Validate { json, .. }
         | Command::Convert { json, .. }
+        | Command::ConvertFxp { json, .. }
         | Command::Patch { json, .. } => *json,
     };
     let out = Out { json };
@@ -988,6 +1081,12 @@ fn main() {
             dry_run,
             ..
         } => run_convert(inputs, out_path.as_ref(), *dry_run, &out).map(AnyReport::Convert),
+        Command::ConvertFxp {
+            inputs,
+            out: fxp_out,
+            overwrite,
+            json: _,
+        } => run_convert_fxp(inputs, fxp_out.as_ref(), *overwrite, &out).map(AnyReport::Convert),
         Command::Patch {
             input,
             name,
