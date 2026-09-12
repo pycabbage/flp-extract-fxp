@@ -26,7 +26,9 @@ Related docs: `serum-fxp-format.md` (Serum fxp), `serum2-importer-analysis.md`
 - Event framing (see `src/flp.rs`): `0..63` byte, `64..127` word,
   `128..191` dword, `>=192` varint-length payload. Event 213 = `0xD5` followed
   by a varint (e.g. 16542 → `9E 81 01`, 47990 → `F6 F6 02`).
-- Zip-packed (`PK`-prefixed) FLPs are out of scope (see AGENTS.md).
+- Zip-packed (`PK`-prefixed) FLPs are unpacked in memory before parsing
+  (`src/zip.rs` via `core::flp_inputs`; see AGENTS.md). Nested archives
+  (zip-in-zip) are not recursed into.
 
 ## 2. `PluginParams` (event 213) top-level payload
 

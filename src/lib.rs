@@ -12,6 +12,10 @@
 //! - [`fxp`]: `.fxp` assembly and Serum2 import-rule validation.
 //! - [`core`]: reusable "scan an FLP for Serum instances" logic plus
 //!   small text / filename / hashing helpers shared by the CLI and wasm.
+//! - [`report`]: structured `--json` CLI report types (serde; camelCase
+//!   keys aligned with the wasm report fields).
+//! - [`zip`]: minimal in-memory ZIP reader for zipped loop packages
+//!   (store + deflate; encrypted / Zip64 rejected).
 //! - [`zlibio`]: shared zlib inflate + Serum chunk stream splitting.
 //! - [`flpconv`]: FLP byte surgery rewriting Serum event-213 payloads
 //!   into Serum2 ones (plan / bundle / apply pipeline).
@@ -25,6 +29,9 @@
 //! - [`s2tree`]: deterministic CBOR value tree + raw zstd frames.
 //! - [`serum2state`]: Serum2 `XferJson` container assembly and parsing,
 //!   including the state → authored (`.SerumPreset`) body conversion.
+//! - [`serum2preset`]: `.SerumPreset` output container assembly
+//!   (EXPERIMENTAL — wraps the converted processor-state body; see the
+//!   module docs).
 //! - `web`: `wasm-bindgen` bindings; only compiled when targeting
 //!   `wasm32-unknown-unknown` (cfg-gated, so native builds never link it).
 //! - `testutil`: `#[cfg(test)]` helpers shared by crate-internal tests.
@@ -33,13 +40,16 @@ pub mod core;
 pub mod flp;
 pub mod flpconv;
 pub mod fxp;
+pub mod report;
 pub mod serum;
+pub mod zip;
 pub mod zlibio;
 
 pub mod importer;
 pub mod s1state;
 pub mod s2tables;
 pub mod s2tree;
+pub mod serum2preset;
 pub mod serum2state;
 
 #[cfg(test)]
