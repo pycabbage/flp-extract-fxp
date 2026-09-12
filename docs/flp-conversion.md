@@ -100,7 +100,7 @@ authoritative description if regeneration is ever needed.
 |---|---|---|
 | CLI | `flp-extract-fxp convert <input.flp> [--out <path>] [--dry-run]` | default output `<input>_serum2.flp` next to the input (`--out` accepted for a single input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance |
 | wasm | `convert_flp(data) -> ConvertReport` (`converted_count`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
-| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` |
+| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp`; a persistent conversion report card below shows the per-instance details table (channel / preset / state → cid3 size / notes), the before/after FLP size comparison, and the full warnings list (skipped instances with their reasons: Serum FX left untouched, per-instance failures, ...) |
 
 ## Verification (real Serum2.vst3 2.0.23)
 

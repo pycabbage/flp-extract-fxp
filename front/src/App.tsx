@@ -2,6 +2,7 @@ import { AlertCircleIcon, DownloadIcon, ExternalLinkIcon, RefreshCwIcon } from "
 import { useRef, useState } from "react"
 import { toast } from "sonner"
 
+import { ConvertResultCard } from "@/components/convert-result-card"
 import { EmptyState } from "@/components/empty-state"
 import { ResultsCard, type ScanResult } from "@/components/results-card"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -303,6 +304,14 @@ export default function App() {
                 )}
               </CardContent>
             </Card>
+          )}
+
+          {result && converted && (
+            <ConvertResultCard
+              outcome={converted}
+              inputSize={result.fileData.length}
+              presets={rows}
+            />
           )}
 
           <footer className="text-muted-foreground mt-auto pt-4 text-center text-xs">
