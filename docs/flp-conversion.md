@@ -98,7 +98,7 @@ authoritative description if regeneration is ever needed.
 
 | Surface | Entry point | Behavior |
 |---|---|---|
-| CLI | `flp-extract-fxp convert <input.flp> [--out <path>] [--dry-run]` | default output `<input>_serum2.flp` next to the input (`--out` accepted for a single input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance |
+| CLI | `flp-extract-fxp convert <input.flp> [--out <path>] [--dry-run]` | default output `<input>_serum2.flp` next to the input (`--out` accepted for a single input only — counted after input resolution, so a directory/glob that resolves to one file is fine); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance. Inputs go through the shared `resolve_inputs` layer: files pass through, directories are walked recursively collecting `.flp` (case-insensitive), `*`/`?`/`**` glob patterns are expanded in-process; results are sorted and de-duplicated, and zero matches abort with `error: no .flp files found in <path>` |
 | wasm | `convert_flp(data) -> ConvertReport` (`converted_count`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
 | web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` |
 

@@ -17,6 +17,24 @@ cargo build --release
 
 ## 使い方
 
+### 入力の指定 (ディレクトリ / glob)
+
+`list` / `extract` / `convert` の入力は複数指定でき、次のように解決されます。
+
+- ファイルはそのまま処理します
+- ディレクトリは再帰的に走査し、拡張子 `.flp` (大文字小文字を区別しない) のファイルを収集します
+- glob パターン (`*` / `?` はパス成分ごと、`**` は 0 個以上の階層またぎ) はプロセス内で展開し、合致した `.flp` を収集します。合致判定は大文字小文字を区別しません
+- 収集結果はソート + 重複除去されるため、出力順は常に決定的です
+- シンボリックリンクは追跡しません
+- 1 件も見つからない場合は `error: no .flp files found in <path>` で終了コード 1 になります
+
+```sh
+flp-extract-fxp list projects/            # ディレクトリ再帰
+flp-extract-fxp extract "projects/**/*.flp"
+```
+
+(`validate` は `.fxp` を対象とするため、この解決は行わず従来どおり明示的なファイルのみを受け付けます。)
+
 ### `list` — Serum インスタンスの一覧
 
 ```sh
@@ -138,6 +156,6 @@ Serum2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外で�
 cargo test
 ```
 
-ユニットテスト (FLP パーサ / 状態解析 / fxp 構築・検証) に加え、合成 FLP からの `extract` → `validate` を実行する統合テスト (`tests/integration.rs`) と、実フィクスチャ fxp の検証テストを含みます。
+ユニットテスト (FLP パーサ / 状態解析 / fxp 構築・検証) に加え、合成 FLP からの `extract` → `validate` を実行する統合テスト (`tests/integration.rs`)、一時ディレクトリツリーでの入力解決 (ディレクトリ再帰 / glob) の統合テスト、および実フィクスチャ fxp の検証テストを含みます。
 
 `convert` は 5 プリセット分の golden 変換状態 (`tests/fixtures/golden_s2/`、実インポータが生成したもの) とのバイト一致テストと、実プロジェクト (`tests/fixtures/serina1.flp`) を変換した FLP の再スキャン / 差分テストで検証します。

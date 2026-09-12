@@ -13,7 +13,7 @@ use flp_extract_fxp::core::{
 use flp_extract_fxp::flpconv::BundleSource;
 use flp_extract_fxp::{flpconv, fxp, serum};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -58,6 +58,222 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+/// True when a path string carries glob syntax (`*` or `?`). A literal Unix
+/// filename containing those characters would be treated as a pattern; the
+/// expansion then simply finds nothing for it.
+fn has_glob_syntax(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s.contains('*') || s.contains('?')
+}
+
+/// Case-insensitive `.flp` extension check.
+fn has_flp_ext(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("flp"))
+}
+
+fn is_sep(c: char) -> bool {
+    c == '/' || c == std::path::MAIN_SEPARATOR
+}
+
+/// Resolves CLI input paths into a sorted, de-duplicated list of files.
+///
+/// - existing files pass through unchanged,
+/// - directories are walked recursively with `std::fs` only, collecting
+///   `*.flp` case-insensitively,
+/// - glob patterns (`*`/`?` per path component, `**` across components) are
+///   expanded in-process; matches are filtered to `.flp` like directory
+///   walks (these commands only consume FLP files),
+/// - symlinks are never followed, so directory cycles are impossible.
+///
+/// An input that resolves to nothing (empty directory, unmatched pattern,
+/// missing path) aborts the whole command with
+/// `no .flp files found in <path>`.
+fn resolve_inputs(inputs: Vec<PathBuf>) -> Result<Vec<PathBuf>, String> {
+    let mut resolved: Vec<PathBuf> = Vec::new();
+    for input in inputs {
+        let matches = if has_glob_syntax(&input) {
+            expand_glob(&input)?
+        } else if input.is_dir() {
+            let mut found = Vec::new();
+            collect_flps(&input, &mut found)?;
+            found
+        } else if input.exists() {
+            vec![input.clone()]
+        } else {
+            Vec::new()
+        };
+        if matches.is_empty() {
+            return Err(format!("no .flp files found in {}", input.display()));
+        }
+        resolved.extend(matches);
+    }
+    // Directory walks and glob expansion return entries in readdir order;
+    // sort + dedup so output and multi-input processing are deterministic
+    // and the same file is never processed twice.
+    resolved.sort();
+    resolved.dedup();
+    Ok(resolved)
+}
+
+/// Recursively collects `.flp` files (case-insensitive) under `dir`.
+fn collect_flps(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let path = entry.path();
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if ft.is_dir() {
+            collect_flps(&path, out)?;
+        } else if ft.is_file() && has_flp_ext(&path) {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Expands a glob pattern against the filesystem.
+///
+/// The components before the first wildcard component form a literal base
+/// directory; the rest is matched level by level (see [`expand_level`]). I/O
+/// errors propagate, except a base that is missing or not a directory, which
+/// simply yields no matches.
+fn expand_glob(pattern: &Path) -> Result<Vec<PathBuf>, String> {
+    let pat = pattern.to_string_lossy().to_string();
+    let comps: Vec<&str> = pat.split(std::path::is_separator).collect();
+    let Some(wild) = comps
+        .iter()
+        .position(|c| c.contains('*') || c.contains('?'))
+    else {
+        // Callers only get here with glob syntax present, so this is
+        // unreachable; be graceful anyway.
+        return Ok(Vec::new());
+    };
+
+    let mut base = PathBuf::new();
+    if pat.starts_with('/') || pat.starts_with(std::path::MAIN_SEPARATOR) {
+        base.push(std::path::MAIN_SEPARATOR.to_string());
+    }
+    for c in &comps[..wild] {
+        if !c.is_empty() {
+            base.push(c);
+        }
+    }
+    if base.as_os_str().is_empty() {
+        base.push(".");
+    }
+    if !base.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut matches = Vec::new();
+    expand_level(&[base], &comps[wild..], &mut matches)?;
+    Ok(matches)
+}
+
+/// Matches `comps` (starting at the first wildcard component) against the
+/// candidate directories in `frontier`, appending matching `.flp` files to
+/// `out`. Only the final pattern component matches files; earlier ones
+/// descend into matching subdirectories.
+fn expand_level(
+    frontier: &[PathBuf],
+    comps: &[&str],
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let Some((head, rest)) = comps.split_first() else {
+        return Ok(());
+    };
+    if *head == "**" {
+        // `**` matches zero or more directory levels: the next component is
+        // tried against every frontier directory plus all (recursively
+        // reachable) subdirectories of them.
+        let mut dirs = frontier.to_vec();
+        let mut i = 0;
+        while i < dirs.len() {
+            let mut subdirs = Vec::new();
+            let entries =
+                std::fs::read_dir(&dirs[i]).map_err(|e| format!("{}: {e}", dirs[i].display()))?;
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("{}: {e}", dirs[i].display()))?;
+                let path = entry.path();
+                let is_dir = entry
+                    .file_type()
+                    .map_err(|e| format!("{}: {e}", path.display()))?
+                    .is_dir();
+                if is_dir {
+                    subdirs.push(path);
+                }
+            }
+            dirs.extend(subdirs);
+            i += 1;
+        }
+        return expand_level(&dirs, rest, out);
+    }
+    let last = rest.is_empty();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for dir in frontier {
+        let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !match_component(head, name) {
+                continue;
+            }
+            let path = entry.path();
+            let ft = entry
+                .file_type()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            if last {
+                if ft.is_file() && has_flp_ext(&path) {
+                    out.push(path);
+                }
+            } else if ft.is_dir() {
+                dirs.push(path);
+            }
+        }
+    }
+    if last {
+        Ok(())
+    } else {
+        expand_level(&dirs, rest, out)
+    }
+}
+
+/// Wildcard match of a single pattern component against a single path
+/// component: `*` matches any run of characters, `?` exactly one; neither
+/// crosses path separators. Matching is case-insensitive (ASCII), consistent
+/// with the case-insensitive `.flp` collection of directory walks.
+fn match_component(pat: &str, name: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0usize, 0usize);
+    let (mut star, mut mark) = (None, 0usize);
+    while ni < n.len() {
+        if pi < p.len() && (p[pi].eq_ignore_ascii_case(&n[ni]) || (p[pi] == '?' && !is_sep(n[ni])))
+        {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ni;
+            pi += 1;
+        } else if let Some(s) = star {
+            if is_sep(n[mark]) {
+                return false;
+            }
+            pi = s + 1;
+            mark += 1;
+            ni = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
 }
 
 fn run_extract(
@@ -406,22 +622,109 @@ fn run_convert(inputs: &[PathBuf], out: Option<&PathBuf>, dry_run: bool) -> Resu
 fn main() {
     let cli = Cli::parse();
     let result = match &cli.command {
-        Command::List { inputs } => run_list(inputs),
+        Command::List { inputs } => resolve_inputs(inputs.to_vec()).and_then(|i| run_list(&i)),
         Command::Extract {
             inputs,
             out,
             overwrite,
             keep_invalid,
-        } => run_extract(inputs, out.as_ref(), *overwrite, *keep_invalid),
+        } => resolve_inputs(inputs.to_vec())
+            .and_then(|i| run_extract(&i, out.as_ref(), *overwrite, *keep_invalid)),
         Command::Validate { inputs } => run_validate(inputs),
         Command::Convert {
             inputs,
             out,
             dry_run,
-        } => run_convert(inputs, out.as_ref(), *dry_run),
+        } => resolve_inputs(inputs.to_vec()).and_then(|i| run_convert(&i, out.as_ref(), *dry_run)),
     };
     if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(pat: &str, path: &str) -> bool {
+        match_components(
+            &pat.split('/').collect::<Vec<_>>(),
+            &path.split('/').collect::<Vec<_>>(),
+        )
+    }
+
+    /// `/`-split pattern vs `/`-split path; `**` matches zero or more
+    /// components. Test-only helper: the runtime path matches component by
+    /// component in [`expand_level`].
+    fn match_components(pat: &[&str], path: &[&str]) -> bool {
+        let Some((head, rest)) = pat.split_first() else {
+            return path.is_empty();
+        };
+        if *head == "**" {
+            return (0..=path.len()).any(|skip| match_components(rest, &path[skip..]));
+        }
+        match path.split_first() {
+            Some((head_p, rest_p)) => {
+                match_component(head, head_p) && match_components(rest, rest_p)
+            }
+            None => false,
+        }
+    }
+
+    #[test]
+    fn component_wildcards() {
+        assert!(match_component("*.flp", "song.flp"));
+        assert!(!match_component("*.flp", "song.flpx"));
+        assert!(match_component("s?ng", "song"));
+        assert!(match_component("s?ng", "s.ng"));
+        assert!(!match_component("s?ng", "sg"));
+        assert!(match_component("*", ""));
+        assert!(match_component("a*b*c", "a-x-b-y-c"));
+        assert!(match_component("a*b*c", "abc"));
+        assert!(!match_component("a*b*c", "a-b-c-d"));
+        // `*`/`?` never cross path separators.
+        assert!(!match_component("*", "a/b"));
+        assert!(!match_component("a*b", "a/x/b"));
+    }
+
+    #[test]
+    fn component_matching_is_case_insensitive() {
+        assert!(match_component("*.FLP", "x.FLP"));
+        assert!(match_component("*.FLP", "x.flp"));
+        assert!(match_component("*.flp", "x.FLP"));
+        assert!(match_component("B?", "ba"));
+        assert!(!match_component("ba", "BA?"));
+    }
+
+    #[test]
+    fn double_star_matches_zero_or_more_components() {
+        assert!(m("**/*.flp", "a.flp"));
+        assert!(m("**/*.flp", "sub/a.flp"));
+        assert!(m("**/*.flp", "x/y/z/a.flp"));
+        assert!(!m("**/*.flp", "a.txt"));
+        assert!(m("a/**/b.flp", "a/b.flp"));
+        assert!(m("a/**/b.flp", "a/s/t/b.flp"));
+        assert!(!m("a/**/b.flp", "b.flp"));
+        // A plain `*` component stays within one level.
+        assert!(m("*.flp", "a.flp"));
+        assert!(!m("*.flp", "sub/a.flp"));
+        assert!(!m("a/*.flp", "a.flp"));
+    }
+
+    #[test]
+    fn flp_extension_case_insensitive() {
+        assert!(has_flp_ext(Path::new("x.flp")));
+        assert!(has_flp_ext(Path::new("dir/x.FLP")));
+        assert!(has_flp_ext(Path::new("x.Flp")));
+        assert!(!has_flp_ext(Path::new("x.flpx")));
+        assert!(!has_flp_ext(Path::new("flp")));
+    }
+
+    #[test]
+    fn glob_syntax_detection() {
+        assert!(has_glob_syntax(Path::new("dir/**/*.flp")));
+        assert!(has_glob_syntax(Path::new("?.flp")));
+        assert!(!has_glob_syntax(Path::new("plain.flp")));
     }
 }

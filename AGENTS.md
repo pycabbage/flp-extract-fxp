@@ -36,6 +36,15 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 - CLI subcommands: `list`, `extract`, `validate`, and
   `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum instances
   inside an FLP as Serum2 instances; see `docs/flp-conversion.md`).
+- Input resolution (`resolve_inputs` in `src/main.rs`, used by
+  `list`/`extract`/`convert`): files pass through; directories are walked
+  recursively with plain `std::fs` collecting `.flp` case-insensitively;
+  `*`/`?`/`**` glob patterns are expanded in-process by a hand-rolled
+  matcher (deliberately NO `walkdir`/`glob` deps — this crate is also the
+  wasm cdylib, so any dependency would land in the browser build too).
+  Results are sorted + deduped for deterministic output; an input resolving
+  to zero files aborts with `error: no .flp files found in <path>` and exit
+  code 1. `validate` keeps taking explicit `.fxp` files only.
 
 ## Frontend + wasm (`front/`)
 
