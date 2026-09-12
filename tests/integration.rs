@@ -316,16 +316,24 @@ fn list_resolves_directory_recursively() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for rel in [
-        "alpha.flp",
-        "beta.FLP",
-        "sub/gamma.flp",
-        "sub/deep/delta.flp",
-    ] {
-        let p = root.join(rel);
+    // Expected paths are joined component-wise so the comparison is
+    // platform-neutral: the binary prints paths with the platform separator
+    // (`\` on Windows, `/` elsewhere), and `PathBuf::join("sub/gamma.flp")`
+    // would embed a literal `/` in the expected string on Windows.
+    let expected: [&[&str]; 4] = [
+        &["alpha.flp"],
+        &["beta.FLP"],
+        &["sub", "gamma.flp"],
+        &["sub", "deep", "delta.flp"],
+    ];
+    for rel in expected {
+        let mut p = root.clone();
+        for part in rel {
+            p.push(part);
+        }
         assert!(
             stdout.contains(p.to_str().unwrap()),
-            "missing {rel}:\n{stdout}"
+            "missing {rel:?}:\n{stdout}"
         );
     }
     // Non-.flp files are never collected (or read).

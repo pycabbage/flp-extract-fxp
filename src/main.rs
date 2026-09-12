@@ -139,9 +139,9 @@ fn collect_flps(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 /// Expands a glob pattern against the filesystem.
 ///
 /// The components before the first wildcard component form a literal base
-/// directory; the rest is matched level by level (see [`expand_level`]). I/O
-/// errors propagate, except a base that is missing or not a directory, which
-/// simply yields no matches.
+/// directory (see [`glob_base`]); the rest is matched level by level (see
+/// [`expand_level`]). I/O errors propagate, except a base that is missing or
+/// not a directory, which simply yields no matches.
 fn expand_glob(pattern: &Path) -> Result<Vec<PathBuf>, String> {
     let pat = pattern.to_string_lossy().to_string();
     let comps: Vec<&str> = pat.split(std::path::is_separator).collect();
@@ -154,18 +154,7 @@ fn expand_glob(pattern: &Path) -> Result<Vec<PathBuf>, String> {
         return Ok(Vec::new());
     };
 
-    let mut base = PathBuf::new();
-    if pat.starts_with('/') || pat.starts_with(std::path::MAIN_SEPARATOR) {
-        base.push(std::path::MAIN_SEPARATOR.to_string());
-    }
-    for c in &comps[..wild] {
-        if !c.is_empty() {
-            base.push(c);
-        }
-    }
-    if base.as_os_str().is_empty() {
-        base.push(".");
-    }
+    let base = glob_base(&pat, &comps[..wild]);
     if !base.is_dir() {
         return Ok(Vec::new());
     }
@@ -173,6 +162,28 @@ fn expand_glob(pattern: &Path) -> Result<Vec<PathBuf>, String> {
     let mut matches = Vec::new();
     expand_level(&[base], &comps[wild..], &mut matches)?;
     Ok(matches)
+}
+
+/// Builds the literal base directory of a glob pattern: the substring before
+/// the first wildcard component, kept verbatim (including its trailing
+/// separator, if any).
+///
+/// The base is deliberately not rebuilt with `PathBuf::push`: push inserts
+/// no separator directly after a Windows drive prefix, so building
+/// `C:\dir\**\*.flp` as `push("C:")` + `push("dir")` yields the
+/// drive-relative `C:dir` (never a directory) and `C:\*.flp` collapses to
+/// `C:`, the current directory of the drive instead of its root. Slicing the
+/// pattern keeps the anchoring the user wrote. Separators are kept as given:
+/// Windows path APIs accept both `/` and `\`, and Unix patterns only ever
+/// contain `/`.
+fn glob_base(pat: &str, literal: &[&str]) -> PathBuf {
+    // Byte offset of the first wildcard component: every literal component is
+    // followed by exactly one separator.
+    let lit_end: usize = literal.iter().map(|c| c.len() + 1).sum();
+    if lit_end == 0 {
+        return PathBuf::from(".");
+    }
+    PathBuf::from(&pat[..lit_end])
 }
 
 /// Matches `comps` (starting at the first wildcard component) against the
@@ -726,5 +737,66 @@ mod tests {
         assert!(has_glob_syntax(Path::new("dir/**/*.flp")));
         assert!(has_glob_syntax(Path::new("?.flp")));
         assert!(!has_glob_syntax(Path::new("plain.flp")));
+    }
+
+    /// Windows-style absolute patterns must anchor at the drive root.
+    /// Building the base with `PathBuf::push` yields the drive-relative
+    /// `C:dir` (push inserts no separator after a `C:` prefix), whose
+    /// `is_dir()` is false — every drive-absolute glob then errored with
+    /// "no .flp files found". The pattern is assembled with MAIN_SEPARATOR
+    /// so the test runs on any platform.
+    #[test]
+    fn glob_base_anchors_windows_drive_prefix() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let build = |pat: &str| {
+            let comps: Vec<&str> = pat.split(std::path::is_separator).collect();
+            let wild = comps
+                .iter()
+                .position(|c| c.contains('*') || c.contains('?'))
+                .unwrap();
+            glob_base(pat, &comps[..wild])
+        };
+
+        // `C:\dir\**\*.flp` -> base `C:\dir` (not the drive-relative `C:dir`).
+        let pat = format!("C:{sep}dir{sep}**{sep}*.flp");
+        assert_eq!(build(&pat), PathBuf::from(format!("C:{sep}dir")));
+        // Glob directly at the drive root: `C:\*.flp` -> base `C:\`.
+        let pat = format!("C:{sep}*.flp");
+        assert_eq!(build(&pat), PathBuf::from(format!("C:{sep}")));
+        // Drive-relative (`C:dir\**\*.flp`) keeps its verbatim semantics.
+        let pat = format!("C:dir{sep}**{sep}*.flp");
+        assert_eq!(build(&pat), PathBuf::from("C:dir"));
+    }
+
+    /// Rooted and relative base construction is unchanged: absolute patterns
+    /// keep their leading separator, patterns without a literal prefix fall
+    /// back to the current directory.
+    #[test]
+    fn glob_base_rooted_and_relative() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let build = |pat: &str| {
+            let comps: Vec<&str> = pat.split(std::path::is_separator).collect();
+            let wild = comps
+                .iter()
+                .position(|c| c.contains('*') || c.contains('?'))
+                .unwrap();
+            glob_base(pat, &comps[..wild])
+        };
+
+        assert_eq!(build("/tmp/**/*.flp"), PathBuf::from(format!("{sep}tmp")));
+        assert_eq!(
+            build(&format!("{sep}dir{sep}*.flp")),
+            PathBuf::from(format!("{sep}dir"))
+        );
+        assert_eq!(build("**/*.flp"), PathBuf::from("."));
+        assert_eq!(
+            build(&format!("a{sep}b{sep}?.flp")),
+            PathBuf::from(format!("a{sep}b"))
+        );
+        // Empty components (double separators) collapse.
+        assert_eq!(
+            build(&format!("a{sep}{sep}b{sep}*.flp")),
+            PathBuf::from(format!("a{sep}b"))
+        );
     }
 }
