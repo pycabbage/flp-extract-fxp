@@ -1457,6 +1457,9 @@ mod tests {
                     crate::testutil::decode_zstd_frame(&golden[gfoff..]),
                     "preset {nn} body differs from the real importer golden"
                 );
+            }
+        }
+    }
     /// Pull the inner cid-3 chunk out of a PluginParams payload (test-local).
     fn inner_cid3(payload: &[u8]) -> Vec<u8> {
         let recs = records_of(payload, 4);
@@ -1543,3 +1546,29 @@ mod tests {
                 }
             } else {
                 assert_eq!(o.1, n.1, "record cid {} changed", o.0);
+                assert_eq!(o.1, n.1, "record cid {} changed", o.0);
+            }
+        }
+    }
+
+    #[test]
+    fn patch_flp_empty_patches_rejected() {
+        assert!(patch_serum_metadata(&sample_flp(), &[]).is_err());
+    }
+
+    #[test]
+    fn patch_flp_serum_fx_warns_and_skips() {
+        let buf = build_flp(&[
+            (EV_NEW_CHANNEL, vec![3, 0]),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                serum1_payload("Serum FX", "/Library/Audio/Plug-Ins/VST3/Serum FX.vst3"),
+            ),
+        ]);
+        let (out, rep) = patch_serum_metadata(&buf, &[fxp::PatchField::Name("X".into())]).unwrap();
+        assert_eq!(out, buf);
+        assert!(rep.patched.is_empty());
+        assert_eq!(rep.warnings.len(), 1);
+        assert!(rep.warnings[0].contains("Serum FX"));
+    }
+}

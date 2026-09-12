@@ -163,7 +163,6 @@ fn print_warning(doc: &core::FlpInput, msg: &str) {
     } else {
         eprintln!("warning: {msg}");
     }
->>>>>>> origin/main
 }
 
 fn run_extract(
@@ -989,7 +988,8 @@ fn run_convert_fxp(
     let mut input_reports: Vec<ConvertInputReport> = Vec::new();
     for (k, input) in inputs.iter().enumerate() {
         let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-        let c = flpconv::convert_fxp_bytes(&buf).map_err(|e| format!("{}: {e}", input.display()))?;
+        let c =
+            flpconv::convert_fxp_bytes(&buf).map_err(|e| format!("{}: {e}", input.display()))?;
         for n in &c.notes {
             report_out.line(&format!("warning: {n}"));
         }
@@ -1007,7 +1007,10 @@ fn run_convert_fxp(
             .unwrap_or_else(|| "preset".into());
         let path = out_dir.join(format!("{}.SerumPreset", sanitize_filename(&stem)));
         if path.exists() && !overwrite {
-            report_out.line(&format!("{} exists, skipped (use --overwrite)", path.display()));
+            report_out.line(&format!(
+                "{} exists, skipped (use --overwrite)",
+                path.display()
+            ));
             input_reports.push(ConvertInputReport {
                 input: input.display().to_string(),
                 dry_run: false,
@@ -1080,13 +1083,10 @@ fn main() {
         } => run_convert(inputs, out_path.as_ref(), *dry_run, &out).map(AnyReport::Convert),
         Command::ConvertFxp {
             inputs,
-            out,
+            out: fxp_out,
             overwrite,
             json: _,
-        } => run_convert_fxp(inputs, out.as_ref(), *overwrite, &out).map(AnyReport::Convert),
-=======
-            ..
-        } => run_convert(inputs, out_path.as_ref(), *dry_run, &out).map(AnyReport::Convert),
+        } => run_convert_fxp(inputs, fxp_out.as_ref(), *overwrite, &out).map(AnyReport::Convert),
         Command::Patch {
             input,
             name,
@@ -1105,7 +1105,6 @@ fn main() {
             &out,
         )
         .map(AnyReport::Patch),
->>>>>>> origin/main
     };
     let mut code = 0;
     match result {
