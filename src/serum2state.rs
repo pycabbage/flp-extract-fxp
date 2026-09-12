@@ -97,12 +97,12 @@ fn assemble(header: &str, frame: &[u8], body_len: u32, format: u32) -> Vec<u8> {
 }
 
 /// Build a complete processor `XferJson` record from a CBOR body tree:
-/// encode canonically, wrap in a raw zstd frame, md5 the frame, assemble.
+/// encode canonically, wrap in a zstd frame, md5 the frame, assemble.
 /// `bodyLen` = uncompressed CBOR byte length, `format` = 2,
 /// `productVersion` = "2.0.23", `version` = 9.0.
 pub fn build_processor_record(body: &Val) -> Vec<u8> {
     let cbor = s2tree::encode_cbor(body);
-    let frame = s2tree::zstd_raw_frame(&cbor);
+    let frame = s2tree::zstd_frame(&cbor);
     let header = processor_json_header(&md5_hex(&frame));
     assemble(&header, &frame, cbor.len() as u32, 2)
 }
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn controller_record_wrap_and_parse() {
         let payload = b"controller body bytes".to_vec();
-        let frame = s2tree::zstd_raw_frame(&payload);
+        let frame = s2tree::zstd_frame(&payload);
         let hdr = controller_json_header(
             &md5_hex(&frame),
             "Release Cut Piano",
