@@ -22,8 +22,8 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { UploadCard } from "@/components/upload-card"
 import {
   buildZip,
-  convertedFlpFilename,
   downloadBlob,
+  downloadConverted,
   formatBytes,
   presetFilename,
 } from "@/lib/download"
@@ -176,8 +176,7 @@ export default function App() {
     try {
       const outcome = convert(result.fileData)
       setConverted(outcome)
-      const name = convertedFlpFilename(result.fileName)
-      downloadBlob(outcome.flp, name)
+      downloadConverted(result.fileName, outcome)
       toast.success(
         `Converted ${outcome.convertedCount} Serum instance${outcome.convertedCount === 1 ? "" : "s"}`
       )
@@ -192,11 +191,9 @@ export default function App() {
     }
   }
 
-  const downloadConverted = () => {
+  const downloadConvertedAgain = () => {
     if (!result || !converted) return
-    const name = convertedFlpFilename(result.fileName)
-    downloadBlob(converted.flp, name)
-    toast.success(`Downloaded ${name} (${formatBytes(converted.flp.length)})`)
+    downloadConverted(result.fileName, converted)
   }
 
   return (
@@ -232,7 +229,7 @@ export default function App() {
           <input
             ref={inputRef}
             type="file"
-            accept=".flp"
+            accept=".flp,.zip"
             className="hidden"
             onChange={onInputChange}
           />
@@ -292,7 +289,7 @@ export default function App() {
                 </Button>
                 {converted && (
                   <>
-                    <Button size="sm" variant="secondary" onClick={downloadConverted}>
+                    <Button size="sm" variant="secondary" onClick={downloadConvertedAgain}>
                       <DownloadIcon /> Download converted .flp
                     </Button>
                     <span className="text-muted-foreground text-sm">
