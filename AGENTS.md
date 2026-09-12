@@ -26,9 +26,14 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
   (cargo builds it automatically first; no separate build step needed).
 - Edition 2024 (Cargo.toml) → requires a recent stable Rust toolchain
   (1.85+). No `rustfmt.toml`/`clippy.toml` in the repo; there's also no CI
-  job running `cargo test`/`clippy`/`fmt` (the only workflow is
+  job running `cargo test`/`clippy`/`fmt` (the workflows are
   `.github/workflows/pages.yml`, which just builds the wasm+frontend and
-  deploys). Run `cargo test` yourself before considering work done.
+  deploys, and `.github/workflows/release.yml`, which on `v*` tag pushes
+  matrix-builds the CLI for win64 / linux64 / macOS x64+arm64, packages
+  binary + README.md as `flp-extract-fxp-{version}-{target}.zip` and
+  attaches them to a GitHub Release with generated notes — wasm is NOT
+  distributed, the web UI ships via Pages). Run `cargo test` yourself
+  before considering work done.
 - Only dependencies are `clap`, `flate2` and `md-5` (native); `wasm-bindgen`
   is a target-specific dep for `wasm32-unknown-unknown` only, `ruzstd` is a
   dev-dependency (test-only zstd decoding). Keep new dependencies wasm32-safe
