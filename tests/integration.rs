@@ -145,6 +145,28 @@ fn extract_from_synthetic_flp_then_validate() {
 }
 
 #[test]
+fn extract_honors_name_template() {
+    let dir = temp_dir("template");
+    let flp_path = dir.join("test_project.flp");
+    std::fs::write(&flp_path, synthetic_flp()).unwrap();
+
+    let out_dir = dir.join("out");
+    let status = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_dir)
+        .args(["--name-template", "{channel}_{index}"])
+        .arg(&flp_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "extract failed");
+
+    // Synthetic FLP: channel "Bass", preset "SynthTest" -> template wins.
+    let fxp_path = out_dir.join("Bass_01.fxp");
+    assert!(fxp_path.exists(), "expected {}", fxp_path.display());
+    assert!(!out_dir.join("01_SynthTest.fxp").exists());
+}
+
+#[test]
 fn validates_real_fixture() {
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/extracted_serum1.fxp");
