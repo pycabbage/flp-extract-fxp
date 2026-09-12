@@ -10,6 +10,8 @@
 //!   preset via [`FlpDoc::build_fxp`] without re-scanning the document.
 //! - [`convert_flp`]: rewrite every Serum synth instance in place as a
 //!   Serum2 instance and return the converted FLP bytes plus a report.
+//! - [`convert_flp_selected`]: same, but only for the instances selected
+//!   by preset-table row index; unselected instances stay byte-identical.
 //!
 //! Per-instance conversion failures never abort a scan; they are reported
 //! as a JSON string array via [`ScanReport::failed_json`]. Duplicates are
@@ -418,8 +420,53 @@ impl ConvertReport {
 /// warning and are left as Serum.
 #[wasm_bindgen]
 pub fn convert_flp(data: &[u8]) -> Result<ConvertReport, JsValue> {
-    let (plans, mut warnings) =
+    convert_impl(data, None)
+}
+
+/// Convert only the selected Serum instances of an FLP (see
+/// [`ConvertReport`]).
+///
+/// `indices` are scan-order instance indices — the same numbers the web UI
+/// shows as the preset table's row (`WasmPreset::index`), not conversion
+/// plan positions (Serum FX rows exist in the table but are never planned;
+/// see [`flpconv::InstancePlan::instance_index`]). Every instance that is
+/// not selected stays byte-identical and is reported in `warnings_json`,
+/// as is a selected index with no convertible Serum synth behind it (a
+/// Serum FX row or an out-of-range index). An empty selection converts
+/// every instance, matching [`convert_flp`].
+#[wasm_bindgen]
+pub fn convert_flp_selected(data: &[u8], indices: &[u32]) -> Result<ConvertReport, JsValue> {
+    if indices.is_empty() {
+        return convert_flp(data);
+    }
+    convert_impl(data, Some(indices))
+}
+
+/// Shared orchestration for [`convert_flp`] and [`convert_flp_selected`];
+/// `rows` narrows the conversion to the selected preset-table rows
+/// (`None` = convert every plan).
+fn convert_impl(data: &[u8], rows: Option<&[u32]>) -> Result<ConvertReport, JsValue> {
+    let (all_plans, mut warnings) =
         flpconv::scan_convertible_detailed(data).map_err(|e| JsValue::from_str(&e))?;
+
+    // Resolve the selection to the plans to rewrite. `apply` only touches
+    // plans in this list, so unselected instances stay byte-identical.
+    let plans: Vec<flpconv::InstancePlan> = match rows {
+        None => all_plans,
+        Some(indices) => {
+            let (positions, mut skipped) = flpconv::filter_plans_by_rows(&all_plans, indices);
+            warnings.append(&mut skipped);
+            let mut kept = Vec::with_capacity(positions.len());
+            let mut next = 0;
+            for (i, plan) in all_plans.into_iter().enumerate() {
+                if next < positions.len() && positions[next] == i {
+                    kept.push(plan);
+                    next += 1;
+                }
+            }
+            kept
+        }
+    };
 
     let mut source = flpconv::RealSource::embedded();
     let mut bundles: Vec<Option<flpconv::Serum2Bundle>> = Vec::with_capacity(plans.len());

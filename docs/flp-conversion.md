@@ -99,8 +99,26 @@ authoritative description if regeneration is ever needed.
 | Surface | Entry point | Behavior |
 |---|---|---|
 | CLI | `flp-extract-fxp convert <input.flp> [--out <path>] [--dry-run]` | default output `<input>_serum2.flp` next to the input (`--out` accepted for a single input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance |
-| wasm | `convert_flp(data) -> ConvertReport` (`converted_count`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
-| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` |
+| wasm | `convert_flp(data)` and `convert_flp_selected(data, indices)` → `ConvertReport` (`converted_count`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
+| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp`; with preset-table rows selected, only those instances are converted (no selection = all, as before) |
+
+### Per-instance selection (subset conversion)
+
+`convert_flp_selected(data, indices)` converts only the selected Serum synth
+instances. `indices` are scan-order instance indices — the same numbers the
+web UI's preset table shows (`WasmPreset::index`), **not** plan positions:
+Serum FX rows exist in the table but are never planned, so plan index ≠ row
+index in general. Every planned instance therefore carries its table row in
+`flpconv::InstancePlan::instance_index` (`None` when the preset chunk could
+not be recovered and the core scan produced no row); 
+`flpconv::filter_plans_by_rows` maps a selection to plan positions and
+collects the per-instance warnings. Rules:
+
+- an empty selection converts everything (`convert_flp` behavior);
+- unselected instances stay byte-identical (`apply` only rewrites planned
+  instances) and each one is reported in `warnings_json`;
+- a selected index with no convertible Serum synth behind it (a Serum FX
+  row, an out-of-range index) is reported in `warnings_json` and skipped.
 
 ## Verification (real Serum2.vst3 2.0.23)
 
@@ -123,7 +141,9 @@ authoritative description if regeneration is ever needed.
   `convert_writes_output`, `converted_flp_scans_clean` (the converted file
   scans as 6 Serum2 instances: 5 converted + the pre-existing one),
   `converted_flp_diff_is_localized` (the diff is limited to the Serum
-  instances' event-213 payloads).
+  instances' event-213 payloads), and the `subset_convert_*` tests (a
+  row-subset conversion leaves every unselected event-213 payload
+  byte-identical and the remaining Serum instances untouched).
 - **Browser flow** verified end-to-end (scan → convert → download).
 
 ## Limitations

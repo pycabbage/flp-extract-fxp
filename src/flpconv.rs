@@ -7,7 +7,7 @@
 //! XferJson records (processor / controller / parameter list) is the
 //! importer's job, injected through the [`BundleSource`] seam.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::core::{display_name, text};
@@ -62,6 +62,13 @@ pub struct InstancePlan {
     /// The parsed Serum preset, captured during the same scan walk
     /// (`None` when parsing failed; the failure is reported as a warning).
     pub s1: Option<s1state::S1Preset>,
+    /// Position of this instance in `scan_serum_instances`' output — the
+    /// row index the web UI's preset table shows for it. `None` when the
+    /// core scan would not have produced a row at all (the preset chunk
+    /// could not be recovered), so the instance is not selectable.
+    /// Selection works on these row indices, not on plan positions:
+    /// Serum FX (and Serum2) rows exist in the table but are never planned.
+    pub instance_index: Option<usize>,
 }
 
 /// One successfully rewritten instance, for the human report.
@@ -218,7 +225,10 @@ fn json_raw_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 /// Walk the FLP events and locate every Serum SYNTH instance, also
 /// returning warnings (one per Serum FX instance deliberately left
 /// untouched). Instances are returned in file order, matching
-/// `scan_serum_instances`' channel/name bookkeeping.
+/// `scan_serum_instances`' channel/name bookkeeping, and each plan carries
+/// its `instance_index` — the row the instance occupies in
+/// `scan_serum_instances`' output (Serum FX rows advance the numbering but
+/// are never planned).
 pub fn scan_convertible_detailed(buf: &[u8]) -> Result<(Vec<InstancePlan>, Vec<String>), String> {
     let spans = flp::parse_event_spans(buf)?;
     let dt_start = locate_chunks(buf)?.2;
@@ -226,6 +236,7 @@ pub fn scan_convertible_detailed(buf: &[u8]) -> Result<(Vec<InstancePlan>, Vec<S
     let mut channels: HashMap<u16, String> = HashMap::new();
     let mut cur_channel: Option<u16> = None;
     let mut cur_fx_name = String::new();
+    let mut rows_seen: usize = 0;
     let mut plans = Vec::new();
     let mut warnings = Vec::new();
 
@@ -258,6 +269,13 @@ pub fn scan_convertible_detailed(buf: &[u8]) -> Result<(Vec<InstancePlan>, Vec<S
                     warnings.push(format!(
                         "Serum FX instance on channel '{where_}' left untouched (only the Serum synth is converted)"
                     ));
+                    // Row bookkeeping must match `scan_serum_instances`,
+                    // which gives an FX instance a table row only when its
+                    // chunk recovers; count it silently (the recovery
+                    // failure is that scan's business to report).
+                    if !pp.state.is_empty() && serum::serum1_chunk_from_state(pp.state).is_ok() {
+                        rows_seen += 1;
+                    }
                     continue;
                 }
                 if !serum::is_serum1_synth(pp.name, pp.filename) || pp.state.is_empty() {
@@ -266,17 +284,25 @@ pub fn scan_convertible_detailed(buf: &[u8]) -> Result<(Vec<InstancePlan>, Vec<S
                 // Single-walk: recover the cid-3 chunk and parse the preset
                 // here so bundling never has to re-inflate the state. A
                 // parse failure yields None + a warning (never aborts).
+                let mut instance_index = None;
                 let (preset_name, s1) = match serum::serum1_chunk_from_state(pp.state) {
-                    Ok(chunk) => match s1state::parse_preset(&chunk.chunk) {
-                        Ok(preset) => (chunk.meta.preset_name, Some(preset)),
-                        Err(e) => {
-                            warnings.push(format!(
-                                "instance on channel '{}': {e}",
-                                display_name(&where_)
-                            ));
-                            (chunk.meta.preset_name, None)
+                    Ok(chunk) => {
+                        // The core scan emits a table row for every instance
+                        // whose chunk recovers — parseable or not — so
+                        // remember this plan's row before parsing.
+                        instance_index = Some(rows_seen);
+                        rows_seen += 1;
+                        match s1state::parse_preset(&chunk.chunk) {
+                            Ok(preset) => (chunk.meta.preset_name, Some(preset)),
+                            Err(e) => {
+                                warnings.push(format!(
+                                    "instance on channel '{}': {e}",
+                                    display_name(&where_)
+                                ));
+                                (chunk.meta.preset_name, None)
+                            }
                         }
-                    },
+                    }
                     Err(e) => {
                         warnings.push(format!(
                             "instance on channel '{}': {e}",
@@ -295,12 +321,55 @@ pub fn scan_convertible_detailed(buf: &[u8]) -> Result<(Vec<InstancePlan>, Vec<S
                     plugin_filename: String::from_utf8_lossy(pp.filename).into_owned(),
                     preset_name,
                     s1,
+                    instance_index,
                 });
             }
             _ => {}
         }
     }
     Ok((plans, warnings))
+}
+
+/// Resolve a row-index selection (the web preset table's `#` indices, i.e.
+/// `scan_serum_instances` positions) to plan positions into the given
+/// `plans` list, returning `(positions, warnings)`. Positions are strictly
+/// increasing (file order), so callers can filter-move the plans 1:1.
+///
+/// Rules (shared by the wasm `convert_flp_selected` API):
+/// - a plan whose `instance_index` is selected is kept;
+/// - every other selectable plan (row exists, not selected) is reported as
+///   skipped in `warnings`;
+/// - a selected row with no matching plan (a Serum FX row, an index whose
+///   chunk recovery failed, or an out-of-range index) is reported as
+///   unconvertible.
+pub fn filter_plans_by_rows(plans: &[InstancePlan], rows: &[u32]) -> (Vec<usize>, Vec<String>) {
+    let selected: HashSet<u32> = rows.iter().copied().collect();
+    let mut positions = Vec::new();
+    let mut matched: HashSet<u32> = HashSet::new();
+    let mut warnings = Vec::new();
+    for (i, plan) in plans.iter().enumerate() {
+        match plan.instance_index {
+            Some(row) if selected.contains(&(row as u32)) => {
+                matched.insert(row as u32);
+                positions.push(i);
+            }
+            Some(row) => warnings.push(format!(
+                "instance #{row} on channel '{}': not selected, left as Serum",
+                display_name(&plan.channel_name)
+            )),
+            // No table row: the preset chunk already failed to recover and
+            // the planning walk warned about it; nothing is selectable.
+            None => {}
+        }
+    }
+    let mut unmatched: Vec<u32> = selected.difference(&matched).copied().collect();
+    unmatched.sort_unstable();
+    for row in unmatched {
+        warnings.push(format!(
+            "instance #{row}: no convertible Serum synth instance, skipped"
+        ));
+    }
+    (positions, warnings)
 }
 
 /// Byte-surgery application: for every (InstancePlan, Serum2Bundle) pair with
@@ -606,7 +675,11 @@ mod tests {
 
     /// A realistic Serum event-213 payload (doc §2.1 / §3).
     fn serum1_payload(name: &str, filename: &str) -> Vec<u8> {
-        let cid3 = s1_cid3();
+        serum1_payload_with(name, filename, s1_cid3())
+    }
+
+    /// Same, with a caller-supplied inner cid 3 (to fake broken chunks).
+    fn serum1_payload_with(name: &str, filename: &str, cid3: Vec<u8>) -> Vec<u8> {
         let mut cid4 = Vec::new();
         cid4.extend_from_slice(&3u32.to_le_bytes());
         cid4.extend_from_slice(&0u32.to_le_bytes());
@@ -868,6 +941,106 @@ mod tests {
     }
 
     #[test]
+    fn instance_index_matches_scan_rows() {
+        // [synth, FX, synth]: the FX occupies table row 1 but is never
+        // planned, so the second synth's row is 2 — not its plan position.
+        let buf = build_flp(&[
+            (EV_NEW_CHANNEL, vec![0, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("A")),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                serum1_payload("Serum", "/VST/Serum.vst3"),
+            ),
+            (EV_NEW_CHANNEL, vec![1, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("B")),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                serum1_payload("Serum FX", "/VST/Serum FX.vst3"),
+            ),
+            (EV_NEW_CHANNEL, vec![2, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("C")),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                serum1_payload("Serum", "/VST/Serum.vst3"),
+            ),
+        ]);
+        let plans = scan_convertible_detailed(&buf).unwrap().0;
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].instance_index, Some(0));
+        assert_eq!(plans[1].instance_index, Some(2));
+        // The core scan's table indeed has three rows (synth, FX, synth).
+        let (instances, _) = crate::core::scan_serum_instances(&buf).unwrap();
+        assert_eq!(instances.len(), 3);
+    }
+
+    #[test]
+    fn broken_chunk_plan_has_no_row_index() {
+        // Unrecoverable chunk -> the core scan emits no row for the first
+        // instance (plan keeps `None`); the next instance still gets row 0.
+        let buf = build_flp(&[
+            (EV_NEW_CHANNEL, vec![0, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("Broken")),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                serum1_payload_with("Serum", "/VST/Serum.vst3", b"not a zlib stream".to_vec()),
+            ),
+            (EV_NEW_CHANNEL, vec![1, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("Good")),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                serum1_payload("Serum", "/VST/Serum.vst3"),
+            ),
+        ]);
+        let (plans, warnings) = scan_convertible_detailed(&buf).unwrap();
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].instance_index, None);
+        assert_eq!(plans[1].instance_index, Some(0));
+        assert!(!warnings.is_empty());
+        let (instances, _) = crate::core::scan_serum_instances(&buf).unwrap();
+        assert_eq!(instances.len(), 1);
+    }
+
+    #[test]
+    fn filter_plans_by_rows_selects_and_reports() {
+        let buf = build_flp(&[
+            (EV_NEW_CHANNEL, vec![0, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("A")),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                serum1_payload("Serum", "/VST/Serum.vst3"),
+            ),
+            (EV_NEW_CHANNEL, vec![1, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("B")),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                serum1_payload("Serum FX", "/VST/Serum FX.vst3"),
+            ),
+            (EV_NEW_CHANNEL, vec![2, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("C")),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                serum1_payload("Serum", "/VST/Serum.vst3"),
+            ),
+        ]);
+        let plans = scan_convertible_detailed(&buf).unwrap().0;
+        // Select row 2 (the second synth); row 9 exists nowhere (out of
+        // range), row 0 is selectable but unselected.
+        let (positions, warnings) = filter_plans_by_rows(&plans, &[2, 9]);
+        assert_eq!(positions, vec![1]);
+        assert_eq!(warnings.len(), 2);
+        assert!(
+            warnings[0].contains("#0") && warnings[0].contains("channel 'A'"),
+            "{}",
+            warnings[0]
+        );
+        assert!(warnings[1].contains("#9"), "{}", warnings[1]);
+        // Empty selection: everything reported as skipped, nothing kept.
+        let (positions, warnings) = filter_plans_by_rows(&plans, &[]);
+        assert!(positions.is_empty());
+        assert_eq!(warnings.len(), 2);
+    }
+
+    #[test]
     fn rejects_zip_buffer() {
         let mut buf = b"PK\x03\x04".to_vec();
         buf.extend_from_slice(&[0u8; 64]);
@@ -1002,6 +1175,7 @@ mod tests {
             plugin_filename: "/Library/Audio/Plug-Ins/VST3/Serum.vst3".into(),
             preset_name: String::new(),
             s1: None,
+            instance_index: Some(0),
         };
         let mut src = RealSource::embedded();
         let bundle = src
@@ -1031,6 +1205,7 @@ mod tests {
             plugin_filename: "Serum_x64.dll".into(),
             preset_name: String::new(),
             s1: None,
+            instance_index: Some(0),
         };
         let mut src = RealSource::embedded();
         // Not a zlib stream at all -> parse_preset fails -> Ok(None) + warning.

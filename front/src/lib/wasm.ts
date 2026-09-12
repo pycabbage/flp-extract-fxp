@@ -1,4 +1,11 @@
-import { convert_flp, scan_doc, type FlpDoc, type WasmPreset } from "flp-extract-fxp"
+import {
+  convert_flp,
+  convert_flp_selected,
+  scan_doc,
+  type ConvertReport,
+  type FlpDoc,
+  type WasmPreset,
+} from "flp-extract-fxp"
 
 export { default as initWasm } from "flp-extract-fxp"
 
@@ -84,6 +91,15 @@ export type ConvertOutcome = {
 
 export function convert(data: Uint8Array): ConvertOutcome {
   const report = convert_flp(data)
+  return toOutcome(report)
+}
+
+export function convertSelected(data: Uint8Array, indices: readonly number[]): ConvertOutcome {
+  const report = convert_flp_selected(data, new Uint32Array(indices))
+  return toOutcome(report)
+}
+
+function toOutcome(report: ConvertReport): ConvertOutcome {
   const outcome = {
     convertedCount: report.converted_count,
     flp: report.flp(),
