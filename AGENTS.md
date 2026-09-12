@@ -8,8 +8,8 @@ One Cargo crate (`flp-extract-fxp`) that is simultaneously:
   that powers the React frontend in `front/` (deployed to GitHub Pages).
 
 Both surfaces share the same core logic in `src/core.rs`, `src/flp.rs`,
-`src/serum.rs`, `src/fxp.rs`, plus the Serum 1 → Serum 2 conversion stack:
-`src/s1state.rs` (Serum 1 state parser), `src/importer.rs` (faithful port of
+`src/serum.rs`, `src/fxp.rs`, plus the Serum → Serum2 conversion stack:
+`src/s1state.rs` (Serum state parser), `src/importer.rs` (faithful port of
 Serum2.vst3's `s1state_load`), `src/s2tree.rs` + `src/serum2state.rs`
 (canonical CBOR + XferJson container), `src/flpconv.rs` (FLP event-213
 rewrite), and `src/s2tables.rs` — **GENERATED** (runtime-dumped descriptor
@@ -34,8 +34,8 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
   dev-dependency (test-only zstd decoding). Keep new dependencies wasm32-safe
   — the conversion stack must compile identically for both targets.
 - CLI subcommands: `list`, `extract`, `validate`, and
-  `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum 1 instances
-  inside an FLP as Serum 2 instances; see `docs/flp-conversion.md`).
+  `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum instances
+  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`).
 
 ## Frontend + wasm (`front/`)
 
@@ -74,19 +74,19 @@ Before touching FLP/Serum parsing, `.fxp` construction, or the conversion
 stack (`src/flp.rs`, `src/serum.rs`, `src/fxp.rs`, `src/s1state.rs`,
 `src/importer.rs`, `src/s2tree.rs`, `src/serum2state.rs`, `src/flpconv.rs`),
 read the relevant doc — they are the verified source of truth (static
-reverse-engineering + real-file calibration + dynamic Serum 2 verification),
+reverse-engineering + real-file calibration + dynamic Serum2 verification),
 not just design notes:
-- `docs/serum-fxp-format.md` — byte-level Serum 1 `.fxp` spec.
-- `docs/serum2-importer-analysis.md` — Serum 2's import validation rules.
-- `docs/s1-to-s2-mapping.md` + `docs/s2-runtime-tables.md` — the real Serum 1
-  → Serum 2 importer (`s1state_load`, RVA 0x4DABC0) and its runtime-dumped
+- `docs/serum-fxp-format.md` — byte-level Serum `.fxp` spec.
+- `docs/serum2-importer-analysis.md` — Serum2's import validation rules.
+- `docs/s1-to-s2-mapping.md` + `docs/s2-runtime-tables.md` — the real Serum
+  → Serum2 importer (`s1state_load`, RVA 0x4DABC0) and its runtime-dumped
   conversion tables (baked into `src/s2tables.rs`).
-- `docs/flp-serum2-conversion.md` — FLP event-213 byte-level rules for Serum 1
-  vs Serum 2 instances (the rewrite recipe).
+- `docs/flp-serum2-conversion.md` — FLP event-213 byte-level rules for Serum
+  vs Serum2 instances (the rewrite recipe).
 - `docs/flp-conversion.md` — the shipped FLP conversion feature (pipeline,
   surfaces, verification, limitations).
 - `docs/serum2-dynamic-verification.md` — live VST3-host verification. Read
-  the CORRECTION section at the top first: `setState` **rejects** Serum 1
+  the CORRECTION section at the top first: `setState` **rejects** Serum
   data (the old "dynamically verified acceptance" conclusion was a false
   positive); the real import path is `s1state_load`.
 
@@ -94,11 +94,11 @@ Key constraints the code encodes (don't "fix" these without re-checking the
 docs above):
 - fxp header fields are **big-endian**; `byteSize` (offset 0x04) is the
   literal total file length, not the Steinberg-spec `fileLen − 8`.
-- Serum 1 preset state is always 172,736 bytes; embedded metadata lives at
+- Serum preset state is always 172,736 bytes; embedded metadata lives at
   fixed offsets (name 0x4972, version f32 0x4994, author 0x49A0, category
   0x49D0).
-- Serum 2 plugin instances are intentionally never extracted (they use an
-  `XferJson`-prefixed state, not the Serum 1 chunk layout) — only counted.
+- Serum2 plugin instances are intentionally never extracted (they use an
+  `XferJson`-prefixed state, not the Serum chunk layout) — only counted.
 - Zip-packed FLPs (`PK`-prefixed "loop package" exports) are unsupported by
   design; the FLP must be extracted first.
 - `src/importer.rs` correctness is proven by **byte-identity tests** against
@@ -118,8 +118,8 @@ CI) passes `cargo test` without them:
 
 - `tests/fixtures/extracted_serum1.fxp` — real extracted fixture used by
   `validates_real_fixture`; pins real-world validation behavior.
-- `tests/fixtures/serina1/*.fxp` (5 real Serum 1 presets) and
-  `tests/fixtures/serina1.flp` (real project: 5 Serum 1 + 1 Serum 2 instance)
+- `tests/fixtures/serina1/*.fxp` (5 real Serum presets) and
+  `tests/fixtures/serina1.flp` (real project: 5 Serum + 1 Serum2 instance)
   drive the converter tests.
 - `tests/fixtures/golden_s2/0N_processor_state.bin` — golden converted
   processor states produced by the REAL importer (called at runtime) and

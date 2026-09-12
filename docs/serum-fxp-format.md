@@ -1,12 +1,12 @@
-# Serum 1 (.fxp) Preset File Format — Byte-Level Specification
+# Serum (.fxp) Preset File Format — Byte-Level Specification
 
 **Purpose:** enable constructing valid Xfer Serum 1.x `.fxp` preset files (importable by
-Serum 2, e.g. `C:\Program Files\Common Files\VST3\Serum2.vst3`) from an extracted
+Serum2, e.g. `C:\Program Files\Common Files\VST3\Serum2.vst3`) from an extracted
 172,736-byte Serum state "chunk" plus optional appended data streams
 (as found decompressed inside FL Studio VST3 plugin states).
 
 **Date of research:** 2026-09-11
-**Method:** 25 real Serum 1 `.fxp` files downloaded from public GitHub repos
+**Method:** 25 real Serum `.fxp` files downloaded from public GitHub repos
 (2015-era through 2026-era, i.e. Serum 1.0x → 1.334), byte-level parsing, zlib stream
 analysis, cross-checked against three independent implementations:
 `btesser/serum2vital` (plugin-verified parser + `craft_fxp.py` writer),
@@ -19,13 +19,13 @@ was performed and validated structurally.
 
 ## 1. File container (60-byte header + chunk)
 
-Serum 1 `.fxp` is a VST2 *opaque chunk program* file ("FPCh" flavor of the Steinberg
+Serum `.fxp` is a VST2 *opaque chunk program* file ("FPCh" flavor of the Steinberg
 `CcnK` preset format). All multi-byte integers below are **big-endian** unless marked LE.
 
-| Offset | Size | Field                | Value in every Serum 1 file examined |
+| Offset | Size | Field                | Value in every Serum file examined |
 |-------:|-----:|----------------------|--------------------------------------|
 | 0x00   | 4    | chunkMagic           | ASCII `CcnK` (43 63 6E 4B) |
-| 0x04   | 4    | byteSize (BE)        | **the whole file length** (= 60 + chunkSize). *Serum deviates from the Steinberg spec (which says fileLen−8); both Serum 1 and Serum 2 accept the file-length value Serum writes.* |
+| 0x04   | 4    | byteSize (BE)        | **the whole file length** (= 60 + chunkSize). *Serum deviates from the Steinberg spec (which says fileLen−8); both Serum and Serum2 accept the file-length value Serum writes.* |
 | 0x08   | 4    | fxMagic              | ASCII `FPCh` (46 50 43 68) |
 | 0x0C   | 4    | format version (BE)  | `1` |
 | 0x10   | 4    | fxProgramID          | ASCII `XfsX` (58 66 73 58) — Serum's VST plugin ID |
@@ -105,7 +105,7 @@ Rules verified across every sample:
 
 Presets written by Serum ≤ ~1.07 (2015) have a **variable-length** state blob
 (21,808 / 28,232 bytes observed) instead of 172,736, with a different internal layout
-("classic" LFO block at 0x0280). Serum 2 still imports them. If you ever need to emit
+("classic" LFO block at 0x0280). Serum2 still imports them. If you ever need to emit
 one, the container rules are identical.
 
 ## 3. The 172,736-byte state blob (stream 0 contents)
@@ -161,12 +161,12 @@ allows 31). Optional: author at 0x49A0 (48 B), category/menu at 0x49D0 (48 B).
 
 ### 4.1 About the JSON metadata block
 
-No `{"author":…,"preset_name":…}` JSON block exists in **any** of the 25 real Serum 1
+No `{"author":…,"preset_name":…}` JSON block exists in **any** of the 25 real Serum
 `.fxp` files examined (2015→2026, incl. files saved 2026 by Serum 1.334 with author/menu
-text filled in — those use the plain 0x49A0/0x49D0 fields). The Serum 2 binary contains
-zero occurrences of `preset_name` / `"author"` — its Serum 1 metadata re-import uses the
+text filled in — those use the plain 0x49A0/0x49D0 fields). The Serum2 binary contains
+zero occurrences of `preset_name` / `"author"` — its Serum metadata re-import uses the
 fixed fields above plus its own database. The JSON-with-`preset_name` pattern matches
-**Serum 2** `.SerumPreset` files (`XferJson\0` container; keys `presetName`,
+**Serum2** `.SerumPreset` files (`XferJson\0` container; keys `presetName`,
 `presetAuthor`), which is almost certainly what was remembered. **Conclusion: no JSON
 is needed or read; do not emit one.**
 

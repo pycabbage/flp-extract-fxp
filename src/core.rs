@@ -1,7 +1,7 @@
 //! Reusable scanning logic shared by the CLI and the WebAssembly bindings.
 //!
 //! [`scan_serum_instances`] walks the FLP event stream once and collects
-//! every usable Serum 1 plugin instance (see [`Instance`]) together with
+//! every usable Serum plugin instance (see [`Instance`]) together with
 //! diagnostic counters ([`ScanStats`]). Everything in this module is
 //! IO-free and platform-independent, so it behaves identically on native
 //! targets and on `wasm32-unknown-unknown`.
@@ -17,15 +17,15 @@ use crate::serum;
 /// Diagnostics collected while scanning an FLP.
 #[derive(Debug, Default)]
 pub struct ScanStats {
-    /// Number of Serum 2 plugin instances encountered (never extracted).
+    /// Number of Serum2 plugin instances encountered (never extracted).
     pub serum2_count: usize,
-    /// Human-readable descriptions of Serum 1 plugin states that could not
+    /// Human-readable descriptions of Serum plugin states that could not
     /// be converted into a preset chunk. Per-instance failures never abort
     /// the scan; callers decide whether to surface them.
     pub failed: Vec<String>,
 }
 
-/// A Serum 1 instance discovered in an FLP.
+/// A Serum instance discovered in an FLP.
 #[derive(Debug)]
 pub struct Instance {
     /// Numeric FL Studio channel the plugin was inserted on, if known.
@@ -34,7 +34,7 @@ pub struct Instance {
     pub channel_name: String,
     /// Plugin display name as stored in the FLP.
     pub plugin_name: String,
-    /// Recovered Serum 1 preset chunk plus parsed metadata.
+    /// Recovered Serum preset chunk plus parsed metadata.
     pub chunk: serum::Serum1Chunk,
 }
 

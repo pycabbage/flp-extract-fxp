@@ -1,8 +1,8 @@
 //! End-to-end tests: build a synthetic FLP, extract it with the real CLI
 //! binary, and validate the resulting .fxp through the CLI as well.
 //!
-//! The `convert_*` tests exercise the Serum 1 -> Serum 2 FLP converter on a
-//! real FL Studio project fixture (5 Serum 1 instances and 1 genuine Serum 2
+//! The `convert_*` tests exercise the Serum -> Serum2 FLP converter on a
+//! real FL Studio project fixture (5 Serum instances and 1 genuine Serum2
 //! instance). That fixture is not tracked in the repo (third-party project
 //! content; see docs/flp-conversion.md) — the tests skip when it is absent.
 
@@ -21,7 +21,7 @@ fn zlib_stream(data: &[u8]) -> Vec<u8> {
     e.finish().unwrap()
 }
 
-/// A synthetic Serum 1 chunk: zlib(preset state) + zlib(table data) + trailer.
+/// A synthetic Serum chunk: zlib(preset state) + zlib(table data) + trailer.
 fn synthetic_serum1_chunk() -> Vec<u8> {
     let mut s0 = vec![0u8; 172_736];
     let name = b"SynthTest";
@@ -195,7 +195,7 @@ fn convert_writes_output() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("converting 5 Serum 1 instance(s)"),
+        stdout.contains("converting 5 Serum instance(s)"),
         "{stdout}"
     );
     assert_eq!(stdout.matches("-> converted (cid3").count(), 5, "{stdout}");
@@ -219,9 +219,9 @@ fn converted_flp_scans_clean() {
     let output = Command::new(BIN).args(["list"]).arg(&out).output().unwrap();
     assert!(output.status.success(), "list failed");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // 5 converted + 1 pre-existing Serum 2 instance.
+    // 5 converted + 1 pre-existing Serum2 instance.
     assert!(
-        stdout.contains("0 Serum 1 preset(s), 6 Serum 2 instance(s)"),
+        stdout.contains("0 Serum preset(s), 6 Serum2 instance(s)"),
         "{stdout}"
     );
 }
@@ -248,21 +248,21 @@ fn converted_flp_diff_is_localized() {
     // FLdt chunk magic at offset 8+hdrlen (=14) unchanged; only the u32
     // length field after it is legitimately rewritten.
     assert_eq!(&conv[14..18], &orig[14..18]);
-    // The conversion grew the file (Serum 2 payloads are larger).
+    // The conversion grew the file (Serum2 payloads are larger).
     assert!(conv.len() > orig.len());
 
-    // The converted file holds exactly 6 Serum 2 instances (5 converted +
-    // 1 original) and no Serum 1 instances at all.
+    // The converted file holds exactly 6 Serum2 instances (5 converted +
+    // 1 original) and no Serum instances at all.
     let (instances, stats) = scan_serum_instances(&conv).unwrap();
     assert!(
         instances.is_empty(),
-        "Serum 1 instances left: {}",
+        "Serum instances left: {}",
         instances.len()
     );
     assert_eq!(stats.serum2_count, 6);
 
     // Structural alignment: on the original sample the converter's plans and
-    // the core scan's Serum 1 instances must be 1:1 in the same order.
+    // the core scan's Serum instances must be 1:1 in the same order.
     let plans = scan_convertible_detailed(&orig).unwrap().0;
     let (instances, _) = scan_serum_instances(&orig).unwrap();
     assert_eq!(plans.len(), instances.len());

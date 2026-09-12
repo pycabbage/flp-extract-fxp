@@ -1,4 +1,4 @@
-//! Serum 2 `XferJson` state container assembly and parsing
+//! Serum2 `XferJson` state container assembly and parsing
 //! (`docs/serum2-state-format.md` §1, `docs/flp-serum2-conversion.md` §4).
 //!
 //! Record layout (identical shape for processor and controller records):
@@ -107,7 +107,7 @@ pub fn build_processor_record(body: &Val) -> Vec<u8> {
     assemble(&header, &frame, cbor.len() as u32, 2)
 }
 
-/// Wrap a GIVEN (unmodified) zstd frame — e.g. lifted from a real Serum 2
+/// Wrap a GIVEN (unmodified) zstd frame — e.g. lifted from a real Serum2
 /// controller instance — into a complete `XferJson` record. The caller is
 /// responsible for the header text (including its `hash` field) and the
 /// declared uncompressed size.

@@ -19,8 +19,8 @@ use std::path::PathBuf;
 #[command(
     name = "flp-extract-fxp",
     version,
-    about = "Extract Serum 1 presets (.fxp) from FL Studio .flp projects.\n\
-             The output files satisfy Serum 2's Serum-1 import checks."
+    about = "Extract Serum presets (.fxp) from FL Studio .flp projects.\n\
+             The output files satisfy Serum2's Serum import checks."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -31,7 +31,7 @@ struct Cli {
 enum Command {
     /// List the Serum plugin instances found in FLP files.
     List { inputs: Vec<PathBuf> },
-    /// Extract Serum 1 presets as Serum-2-loadable .fxp files.
+    /// Extract Serum presets as Serum2-loadable .fxp files.
     Extract {
         /// FLP files to process.
         inputs: Vec<PathBuf>,
@@ -41,13 +41,13 @@ enum Command {
         /// Overwrite existing output files.
         #[arg(long)]
         overwrite: bool,
-        /// Keep extracting even when a preset fails Serum 2 validation.
+        /// Keep extracting even when a preset fails Serum2 validation.
         #[arg(long)]
         keep_invalid: bool,
     },
-    /// Check .fxp files against Serum 2's Serum-1 import rules.
+    /// Check .fxp files against Serum2's Serum import rules.
     Validate { inputs: Vec<PathBuf> },
-    /// Convert Serum 1 instances in FLP files into Serum 2 instances.
+    /// Convert Serum instances in FLP files into Serum2 instances.
     Convert {
         /// FLP files to process.
         inputs: Vec<PathBuf>,
@@ -76,7 +76,7 @@ fn run_extract(
         }
         if instances.is_empty() {
             eprintln!(
-                "{}: no Serum 1 presets found ({} Serum 2 instance(s) skipped)",
+                "{}: no Serum presets found ({} Serum2 instance(s) skipped)",
                 input.display(),
                 stats.serum2_count
             );
@@ -88,11 +88,11 @@ fn run_extract(
         };
         std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
         println!(
-            "{}: {} Serum 1 preset(s){}",
+            "{}: {} Serum preset(s){}",
             input.display(),
             instances.len(),
             if stats.serum2_count > 0 {
-                format!(", {} Serum 2 instance(s) skipped", stats.serum2_count)
+                format!(", {} Serum2 instance(s) skipped", stats.serum2_count)
             } else {
                 String::new()
             }
@@ -194,7 +194,7 @@ fn run_extract(
     }
     if total_invalid > 0 {
         return Err(format!(
-            "{total_invalid} preset(s) failed Serum 2 validation (see above)"
+            "{total_invalid} preset(s) failed Serum2 validation (see above)"
         ));
     }
     if total_extracted == 0 {
@@ -212,7 +212,7 @@ fn run_list(inputs: &[PathBuf]) -> Result<(), String> {
             eprintln!("warning: {msg}");
         }
         println!(
-            "{}: {} Serum 1 preset(s), {} Serum 2 instance(s)",
+            "{}: {} Serum preset(s), {} Serum2 instance(s)",
             input.display(),
             instances.len(),
             stats.serum2_count
@@ -234,7 +234,7 @@ fn run_list(inputs: &[PathBuf]) -> Result<(), String> {
         }
     }
     if !any {
-        eprintln!("no Serum 1 presets found in any input");
+        eprintln!("no Serum presets found in any input");
     }
     Ok(())
 }
@@ -252,7 +252,7 @@ fn run_validate(inputs: &[PathBuf]) -> Result<(), String> {
             report.issues.push(fxp::ValidationIssue {
                 severity: fxp::Severity::Fatal,
                 message:
-                    "file extension is not .fxp (Serum 2 only offers the import for .fxp names)"
+                    "file extension is not .fxp (Serum2 only offers the import for .fxp names)"
                         .to_string(),
             });
         }
@@ -292,21 +292,18 @@ fn run_convert(inputs: &[PathBuf], out: Option<&PathBuf>, dry_run: bool) -> Resu
     let mut total_converted = 0usize;
     for input in inputs {
         let buf = std::fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-        // Single walk: the plans already carry each instance's parsed Serum 1
+        // Single walk: the plans already carry each instance's parsed Serum
         // preset (plan.s1) and preset name; nothing re-scans the buffer.
         let (plans, scan_warnings) = flpconv::scan_convertible_detailed(&buf)?;
         if plans.is_empty() {
             for w in &scan_warnings {
                 eprintln!("warning: {w}");
             }
-            eprintln!(
-                "{}: no convertible Serum 1 instances found",
-                input.display()
-            );
+            eprintln!("{}: no convertible Serum instances found", input.display());
             continue;
         }
         println!(
-            "{}: converting {} Serum 1 instance(s)",
+            "{}: converting {} Serum instance(s)",
             input.display(),
             plans.len()
         );
@@ -318,7 +315,7 @@ fn run_convert(inputs: &[PathBuf], out: Option<&PathBuf>, dry_run: bool) -> Resu
                     let reason = source
                         .warnings
                         .pop()
-                        .unwrap_or_else(|| "no Serum 2 bundle produced".into());
+                        .unwrap_or_else(|| "no Serum2 bundle produced".into());
                     return Err(format!(
                         "instance {} on channel '{}': {reason}",
                         i + 1,

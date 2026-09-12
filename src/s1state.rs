@@ -1,4 +1,4 @@
-//! Serum 1 preset-state parsing: splits a Serum 1 fxp `chunk` into its zlib
+//! Serum preset-state parsing: splits a Serum fxp `chunk` into its zlib
 //! streams, inflates the 172,736-byte state blob and exposes it through typed,
 //! bounds-checked accessors for the downstream S1 -> S2 converter.
 
@@ -93,7 +93,7 @@ pub const MOD_SLOT_COUNT: usize = 32;
 pub const MOD_SLOTS_1_16: usize = 0x0000;
 pub const MOD_SLOTS_17_32: usize = 0x50E0;
 
-/// Raw Serum 1 preset data ready for conversion.
+/// Raw Serum preset data ready for conversion.
 #[derive(Debug, Clone)]
 pub struct S1Preset {
     /// The full decompressed state blob (172,736 bytes for modern presets).
@@ -267,7 +267,7 @@ fn parse_mod_slots(blob: &[u8]) -> Vec<S1ModSlot> {
     found.into_iter().flatten().collect()
 }
 
-/// Parse a raw Serum 1 preset chunk (concatenated zlib streams + u32 LE
+/// Parse a raw Serum preset chunk (concatenated zlib streams + u32 LE
 /// trailer, i.e. `crate::serum::Serum1Chunk::chunk`) into a typed [`S1Preset`].
 pub fn parse_preset(chunk: &[u8]) -> Result<S1Preset, String> {
     // The trailer word is tolerated missing or stale (chunks recovered
@@ -276,7 +276,7 @@ pub fn parse_preset(chunk: &[u8]) -> Result<S1Preset, String> {
     let blob = streams[0].clone();
     if blob.len() != S1_BLOB_SIZE {
         return Err(format!(
-            "old-format Serum 1 preset not supported by the converter \
+            "old-format Serum preset not supported by the converter \
              (state blob is {} bytes, expected {S1_BLOB_SIZE})",
             blob.len()
         ));
@@ -827,7 +827,7 @@ mod tests {
             let chunk = chunk_from(&vec![0u8; size], &[]);
             let err = parse_preset(&chunk).unwrap_err();
             assert!(
-                err.contains("old-format Serum 1 preset not supported by the converter"),
+                err.contains("old-format Serum preset not supported by the converter"),
                 "{err}"
             );
         }
@@ -859,7 +859,7 @@ mod tests {
     }
 
     // Real-fixture regression check, not run by default: parses the five
-    // Serum 1 .fxp presets in the directory named by the S1_FXP_DIR
+    // Serum .fxp presets in the directory named by the S1_FXP_DIR
     // environment variable and asserts the byte-verified expectations from
     // docs/s1-params.md §10. Run with:
     //   S1_FXP_DIR=<path to the conv_work fxp fixture dir> cargo test s1state

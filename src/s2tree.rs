@@ -1,4 +1,4 @@
-//! Serum 2 state body tree: a deterministic CBOR (RFC 8949 subset) value tree
+//! Serum2 state body tree: a deterministic CBOR (RFC 8949 subset) value tree
 //! with encode/decode plus raw zstd frame assembly, matching the canonical
 //! Python reference encoder byte-for-byte (validated against 460+ KB of
 //! plugin-produced bodies; see `docs/serum2-state-format.md` and
@@ -352,7 +352,7 @@ impl<'a> Reader<'a> {
             }
             6 => {
                 // Tag: consume and decode the tagged item (tags are unused in
-                // Serum 2 bodies but tolerated for strict forward reads).
+                // Serum2 bodies but tolerated for strict forward reads).
                 self.item()
             }
             _ => match info {

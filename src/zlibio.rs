@@ -34,7 +34,7 @@ pub fn inflate(data: &[u8], max_out: usize) -> Result<(Vec<u8>, usize), String> 
     Ok((out, dec.total_in() as usize))
 }
 
-/// Split a Serum 1 chunk into its zlib streams and validate the trailer.
+/// Split a Serum chunk into its zlib streams and validate the trailer.
 ///
 /// Layout: `[zlib stream 0][zlib stream 1]...[u32 LE trailer]` where the
 /// trailer equals the compressed size of stream 0 (the preset state; the

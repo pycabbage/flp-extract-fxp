@@ -1,6 +1,6 @@
-# Serum 2 parameter corpus (native `.SerumPreset` factory presets)
+# Serum2 parameter corpus (native `.SerumPreset` factory presets)
 
-Status: **measured** — all 626 native Serum 2 factory presets
+Status: **measured** — all 626 native Serum2 factory presets
 (`C:\Users\cabbage\Documents\Xfer\Serum 2 Presets\Presets\Factory\**\*.SerumPreset`,
 Xfer 2.0.11–2.0.15 installs) parsed with the verified CBOR decoder
 (`conv_work\scripts\cbor_probe.py`; zero unexplained bytes in every body).

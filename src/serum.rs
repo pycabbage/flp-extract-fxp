@@ -1,7 +1,7 @@
-//! Serum plugin state handling: detecting Serum 1 instances and recovering
-//! the Serum 1 preset chunk (the exact `chunk` region of a Serum `.fxp`).
+//! Serum plugin state handling: detecting Serum instances and recovering
+//! the Serum preset chunk (the exact `chunk` region of a Serum `.fxp`).
 
-/// Size of the decompressed Serum 1 preset state for contemporary presets.
+/// Size of the decompressed Serum preset state for contemporary presets.
 pub const SERUM1_STATE_SIZE: usize = 172_736;
 /// Offset of the 32-byte preset name inside the decompressed state.
 pub const OFF_PRESET_NAME: usize = 0x4972;
@@ -16,7 +16,7 @@ fn err<T>(msg: impl Into<String>) -> Result<T, String> {
     Err(msg.into())
 }
 
-/// Where the Serum 1 chunk was recovered from (for diagnostics).
+/// Where the Serum chunk was recovered from (for diagnostics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     /// FL Studio VST3 wrapper: `[prologue][chunks..., state = cid 3]`, the
@@ -39,7 +39,7 @@ pub struct PresetMeta {
     pub version_f32: f32,
 }
 
-/// The recovered Serum 1 chunk plus parsed metadata.
+/// The recovered Serum chunk plus parsed metadata.
 #[derive(Debug)]
 pub struct Serum1Chunk {
     /// Exact bytes of the fxp `chunk` region: one or more concatenated zlib
@@ -53,8 +53,8 @@ pub struct Serum1Chunk {
     pub stream_sizes: Vec<usize>,
 }
 
-/// True when the plugin described by `name`/`filename` is Serum 1
-/// (the synth or "Serum FX"), i.e. not Serum 2 and not something unrelated.
+/// True when the plugin described by `name`/`filename` is Serum
+/// (the synth or "Serum FX"), i.e. not Serum2 and not something unrelated.
 pub fn is_serum1(name: &[u8], filename: &[u8]) -> bool {
     let name = String::from_utf8_lossy(name).trim().to_ascii_lowercase();
     let filename = String::from_utf8_lossy(filename)
@@ -81,7 +81,7 @@ pub fn is_serum1(name: &[u8], filename: &[u8]) -> bool {
         || basename == "serum_x64"
 }
 
-/// True when the plugin is Serum 2 (reported separately, never extracted).
+/// True when the plugin is Serum2 (reported separately, never extracted).
 pub fn is_serum2(name: &[u8], filename: &[u8]) -> bool {
     let name = String::from_utf8_lossy(name).trim().to_ascii_lowercase();
     let filename = String::from_utf8_lossy(filename)
@@ -111,7 +111,7 @@ pub fn plugin_basename(filename: &[u8]) -> String {
         .to_string()
 }
 
-/// Serum 1 *synth* only — excludes "Serum FX" and Serum 2.
+/// Serum *synth* only — excludes "Serum FX" and Serum2.
 pub fn is_serum1_synth(name: &[u8], filename: &[u8]) -> bool {
     let name = String::from_utf8_lossy(name).trim().to_ascii_lowercase();
     let base = plugin_basename(filename);
@@ -207,7 +207,7 @@ fn chunk_from_ccnk(blob: &[u8]) -> Result<&[u8], String> {
     }
 }
 
-/// Recover the Serum 1 preset chunk from a `PluginParams` state payload.
+/// Recover the Serum preset chunk from a `PluginParams` state payload.
 pub fn serum1_chunk_from_state(state: &[u8]) -> Result<Serum1Chunk, String> {
     if state.is_empty() {
         return err("plugin state is empty");
@@ -215,7 +215,7 @@ pub fn serum1_chunk_from_state(state: &[u8]) -> Result<Serum1Chunk, String> {
 
     let (raw, source): (&[u8], SourceKind) = if let Some(cid3) = fl_vst3_wrapper_cid3(state) {
         if cid3.starts_with(b"XferJson") {
-            return err("cid-3 state is Serum 2 XferJson (not Serum 1)");
+            return err("cid-3 state is Serum2 XferJson (not Serum)");
         }
         (cid3, SourceKind::FlVst3Wrapper)
     } else if state.starts_with(b"VstW") {
@@ -244,7 +244,7 @@ pub fn serum1_chunk_from_state(state: &[u8]) -> Result<Serum1Chunk, String> {
 
     let mut chunk = raw.to_vec();
     if !has_trailer {
-        // Serum 2's importer silently rejects chunks without the trailer
+        // Serum2's importer silently rejects chunks without the trailer
         // word; append it (compressed size of stream 0) at the end.
         let (_, s0_len) = crate::zlibio::inflate(raw, crate::zlibio::MAX_STREAM)?;
         chunk.extend_from_slice(&(s0_len as u32).to_le_bytes());

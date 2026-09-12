@@ -1,4 +1,4 @@
-# Serum 1 parameter table & state-blob layouts (172,736-byte preset state)
+# Serum parameter table & state-blob layouts (172,736-byte preset state)
 
 **Purpose:** definitive, implementation-ready reference for reading a Serum 1.x
 preset state blob (the 172,736-byte stream-0 payload of a `.fxp`) into named,
@@ -6,7 +6,7 @@ physically-interpreted values. Companion machine-readable file:
 `C:/Users/cabbage\\AppData\\Local\\Temp/opencode/conv_work/s1params/s1_params.json`
 (not part of this repo; the tables below are the canonical copy).
 
-**Primary source:** `btesser/serum2vital` (plugin-verified Serum 1 -> Vital
+**Primary source:** `btesser/serum2vital` (plugin-verified Serum -> Vital
 converter) — `serum_params.py` (the 299-name table from Serum's own
 `SYParameters` listing for build 1.334, with name corrections verified against
 the plugin), `serum_tables.py` (unit curves + menus read from the plugin's
@@ -748,4 +748,4 @@ The five FL-state presets, one line each:
   frames, 8192 B/frame; the default 16 KB stream is the built-in noise sample
   `AC hum1.wav`, md5 `1765102a…`) — must be preserved verbatim; the trailing
   u32 LE is the *compressed* length of stream 0.
-* Zip-packed FLPs and Serum 2 (`XferJson`) state are out of scope here.
+* Zip-packed FLPs and Serum2 (`XferJson`) state are out of scope here.

@@ -1,9 +1,9 @@
-//! FLP rewrite machinery: turning Serum 1 `PluginParams` (event 213) payloads
-//! into Serum 2 ones.
+//! FLP rewrite machinery: turning Serum `PluginParams` (event 213) payloads
+//! into Serum2 ones.
 //!
 //! Every byte rule implemented here comes from
 //! `docs/flp-serum2-conversion.md` §6 ("Rewrite recipe"). This module only
-//! performs byte surgery on the event stream; building the actual Serum 2
+//! performs byte surgery on the event stream; building the actual Serum2
 //! XferJson records (processor / controller / parameter list) is the
 //! importer's job, injected through the [`BundleSource`] seam.
 
@@ -16,13 +16,13 @@ use crate::s1state;
 use crate::serum;
 use crate::serum2state;
 
-/// 16-byte Serum 2 plugin UID for top-level cid 52 (doc §2.6):
+/// 16-byte Serum2 plugin UID for top-level cid 52 (doc §2.6):
 /// ASCII `XESVsfsPerum 2` + 2 NULs.
 const SERUM2_UID: [u8; 16] = [
     0x58, 0x45, 0x53, 0x56, 0x73, 0x66, 0x73, 0x50, 0x65, 0x72, 0x75, 0x6D, 0x20, 0x32, 0x00, 0x00,
 ];
 
-/// Everything needed to turn one Serum 1 instance into a Serum 2 instance.
+/// Everything needed to turn one Serum instance into a Serum2 instance.
 /// Built by the orchestrator (the importer runs elsewhere); flpconv only does
 /// byte surgery.
 #[derive(Debug, Clone)]
@@ -32,7 +32,7 @@ pub struct Serum2Bundle {
     /// Full XferJson controller record (inner cid-2), or None to omit it.
     pub controller_record: Option<Vec<u8>>,
     /// FL's saved parameter-id list (inner cid-4 payload bytes, lifted from a
-    /// genuine Serum 2 instance — 10,496 B for 2.0.22).
+    /// genuine Serum2 instance — 10,496 B for 2.0.22).
     pub param_list: Vec<u8>,
     /// Plugin name string for cid 54 ("Serum2").
     pub name: String,
@@ -42,7 +42,7 @@ pub struct Serum2Bundle {
     pub vendor: String,
 }
 
-/// One convertible Serum 1 synth instance, located in the event stream.
+/// One convertible Serum synth instance, located in the event stream.
 #[derive(Debug, Clone)]
 pub struct InstancePlan {
     /// Index into `parse_events()` output.
@@ -59,7 +59,7 @@ pub struct InstancePlan {
     /// Preset name recovered while planning (empty when the state could not
     /// be recovered/parsed).
     pub preset_name: String,
-    /// The parsed Serum 1 preset, captured during the same scan walk
+    /// The parsed Serum preset, captured during the same scan walk
     /// (`None` when parsing failed; the failure is reported as a warning).
     pub s1: Option<s1state::S1Preset>,
 }
@@ -69,7 +69,7 @@ pub struct InstancePlan {
 pub struct ConvertedInstance {
     pub channel: Option<u16>,
     pub channel_name: String,
-    /// Preset name recovered from the original Serum 1 state (may be empty).
+    /// Preset name recovered from the original Serum state (may be empty).
     pub preset_name: String,
     pub new_payload_len: usize,
 }
@@ -90,12 +90,12 @@ pub trait BundleSource {
     ) -> Result<Option<Serum2Bundle>, String>;
 }
 
-/// Produces Serum 2 bundles from Serum 1 instances by running the importer.
+/// Produces Serum2 bundles from Serum instances by running the importer.
 pub struct RealSource {
     /// FL's saved parameter-id list template (inner cid-4 payload of a real
-    /// Serum 2 instance, 2.0.22-era).
+    /// Serum2 instance, 2.0.22-era).
     pub param_list: Vec<u8>,
-    /// Controller record template (inner cid-2 payload of a real Serum 2
+    /// Controller record template (inner cid-2 payload of a real Serum2
     /// instance; the JSON header gets patched per preset).
     pub controller_template: Option<Vec<u8>>,
     /// Failure reasons collected for instances that produced `Ok(None)`
@@ -104,7 +104,7 @@ pub struct RealSource {
 }
 
 impl RealSource {
-    /// Loads the embedded calibration defaults (real Serum 2 2.0.22 instance
+    /// Loads the embedded calibration defaults (real Serum2 2.0.22 instance
     /// payloads lifted from `serina1.flp`, see docs/flp-serum2-conversion.md
     /// §7).
     pub fn embedded() -> Self {
@@ -160,7 +160,7 @@ impl BundleSource for RealSource {
     }
 }
 
-/// Derive the Serum 2 plugin filename from the ORIGINAL instance's filename:
+/// Derive the Serum2 plugin filename from the ORIGINAL instance's filename:
 /// keep the directory prefix, replace the basename with `Serum2.vst3`
 /// (doc §6 #4). e.g. `/Library/.../Serum.vst3` -> `/Library/.../Serum2.vst3`,
 /// `C:\VST\Serum_x64.dll` -> `C:\VST\Serum2.vst3`.
@@ -215,7 +215,7 @@ fn json_raw_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     Some(rest[..end].trim())
 }
 
-/// Walk the FLP events and locate every Serum 1 SYNTH instance, also
+/// Walk the FLP events and locate every Serum SYNTH instance, also
 /// returning warnings (one per Serum FX instance deliberately left
 /// untouched). Instances are returned in file order, matching
 /// `scan_serum_instances`' channel/name bookkeeping.
@@ -304,7 +304,7 @@ pub fn scan_convertible_detailed(buf: &[u8]) -> Result<(Vec<InstancePlan>, Vec<S
 }
 
 /// Byte-surgery application: for every (InstancePlan, Serum2Bundle) pair with
-/// `Some(bundle)`, replace that event's payload with the rebuilt Serum 2
+/// `Some(bundle)`, replace that event's payload with the rebuilt Serum2
 /// payload and re-frame everything (varint length, FLdt u32 length). Every
 /// other event stays byte-identical and everything before the FLdt payload is
 /// preserved; the output never has trailing bytes.
@@ -353,7 +353,7 @@ pub fn apply(
     for (i, (plan, bundle)) in plans.iter().zip(bundles).enumerate() {
         let Some(b) = bundle else {
             report.warnings.push(format!(
-                "instance on channel '{}' skipped (no Serum 2 bundle supplied)",
+                "instance on channel '{}' skipped (no Serum2 bundle supplied)",
                 display_name(&plan.channel_name)
             ));
             continue;
@@ -471,7 +471,7 @@ fn push_varint(out: &mut Vec<u8>, mut len: usize) {
     }
 }
 
-/// Build the new Serum 2 event-213 payload from the original Serum 1 payload
+/// Build the new Serum2 event-213 payload from the original Serum payload
 /// plus a bundle (doc §6). The original version u32 and records
 /// cid 2/30/32/50 are kept verbatim; cid 1 gets its u32@8 patched 12 -> 1;
 /// cid 52/54/55 are replaced; cid 56 uses the bundle vendor (falling back to
@@ -582,7 +582,7 @@ mod tests {
         0x00,
     ];
 
-    /// Real-shaped Serum 1 inner cid 3: zlib preset state (preset name at
+    /// Real-shaped Serum inner cid 3: zlib preset state (preset name at
     /// 0x4972) + a second wavetable stream + u32 LE trailer (doc §3.3).
     fn s1_cid3() -> Vec<u8> {
         let mut s0 = vec![0u8; serum::SERUM1_STATE_SIZE];
@@ -604,7 +604,7 @@ mod tests {
         v
     }
 
-    /// A realistic Serum 1 event-213 payload (doc §2.1 / §3).
+    /// A realistic Serum event-213 payload (doc §2.1 / §3).
     fn serum1_payload(name: &str, filename: &str) -> Vec<u8> {
         let cid3 = s1_cid3();
         let mut cid4 = Vec::new();
@@ -857,7 +857,7 @@ mod tests {
         let (plans, warnings) = scan_convertible_detailed(&buf).unwrap();
         assert!(plans.is_empty());
         assert_eq!(warnings.len(), 1);
-        // Also visible via scan_serum_instances' bookkeeping: it IS Serum 1
+        // Also visible via scan_serum_instances' bookkeeping: it IS Serum
         // per serum::is_serum1, but our planner must exclude the FX.
         let (instances, _) = crate::core::scan_serum_instances(&buf).unwrap();
         assert_eq!(instances.len(), 1);

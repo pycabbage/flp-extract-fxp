@@ -1,4 +1,4 @@
-# Serum 2 (2.0.23) — Static RE notes: "Load Serum 1 preset (.fxp)" validation path
+# Serum2 (2.0.23) — Static RE notes: "Load Serum 1 preset (.fxp)" validation path
 
 Target: `C:\Program Files\Common Files\VST3\Serum2.vst3\Contents\x86_64-win\Serum2.vst3`
 SHA256: `9293EB90FC9FC890FD2505272ABD6172CEE5BD32B1FB20BE22531810702BF9B3`
@@ -8,7 +8,7 @@ Date of analysis: 2026-09-11. Analysis: static only (no execution of the plugin)
 
 - Python 3.14 + `pefile` 2024.8.26 + `capstone` 5.0.9 (`pip install --break-system-packages --user`)
 - Custom scripts (in `C:\Users\cabbage\AppData\Local\Temp\opencode\work\`): full-file ASCII/UTF-16 string scan with RVA mapping; .pdata-based function enumeration (32,927 functions); linear capstone disassembly of every function indexing (a) rip-relative refs into `.rdata`/`.data` strings, (b) magic immediates; rel32 call xref scan.
-- Cross-validation data files on disk (read-only): `C:\Users\cabbage\Documents\Xfer\Serum 2 Presets\Presets\Factory\*.SerumPreset` (these are "XferJson" JSON files, NOT CcnK — so the CcnK path analyzed here is exclusively the Serum-1 fxp path).
+- Cross-validation data files on disk (read-only): `C:\Users\cabbage\Documents\Xfer\Serum 2 Presets\Presets\Factory\*.SerumPreset` (these are "XferJson" JSON files, NOT CcnK — so the CcnK path analyzed here is exclusively the Serum fxp path).
 
 ## 2. PE facts
 
@@ -48,7 +48,7 @@ load_entry  0xC26C0–0xC30E4          ("load preset file" dispatcher; called fr
                                                  stack5 = (file[0x13]=='Y'), stack6 = filename)
 
 Second, equivalent parser (preset-database / metadata import path):
-  0x511A30 → 0x4DA2F0–0x4DAA6B  ("parse Serum1 fxp": same header checks, own 172736-byte state buffer,
+  0x511A30 → 0x4DA2F0–0x4DAA6B  ("parse Serum fxp": same header checks, own 172736-byte state buffer,
                                   version migrations, then SQLite S1 metadata extraction)
 ```
 
@@ -152,7 +152,7 @@ Because the 172736-byte state buffer is zero-filled before the copy, **N < 0x499
 - Bank formats ("FBCh"/"FxBk") are never referenced anywhere in the binary — only single-program fxp.
 - 'Syl1' at fxp+0x10 yields the dedicated "Made for Sylenth" error (validator 0x4D9C23).
 
-## 10. Requirements for a Serum-2-loadable Serum1 fxp (FINAL)
+## 10. Requirements for a Serum2-loadable Serum fxp (FINAL)
 
 Every check the loader performs, in order:
 
@@ -163,7 +163,7 @@ Every check the loader performs, in order:
 5. **V = BE32(file+0x38)** must satisfy **1 <= V <= 0x4000000**, **V >= 0x28**, and **V + 0x3C <= filesize**. [certain]
 6. **Trailer N = LE32(file + 0x38 + V)** (last 4 bytes of the chunk region): **top byte <= 3** (N <= 0x03FFFFFF), **N >= 1**; database-import parser additionally bounds **1 <= N <= 0xFFFFF**; practical requirement **N == 172736** for the fixed state buffer. [certain for bounds; buffer size inference high-confidence]
 7. **State = file[0x3C .. 0x3C+N)** copied into a 172736-byte zeroed buffer (truncation tolerated); therefore **N >= 0x4998** so the version float is real data, and in practice **N = 172736**. [certain]
-8. **version float32 at state+0x4994 (file offset 0x49D0)** must be in **[0.002, 0.999]**. Use a real Serum-1 chunk version (e.g. 0.163, 0.162) to land in the newest migration bucket; >= 0.149 avoids the `oldSerum1Preset` flag; >= 0.009 avoids the "Patch is Old" warning. [certain on bounds; recommendation-level on values]
+8. **version float32 at state+0x4994 (file offset 0x49D0)** must be in **[0.002, 0.999]**. Use a real Serum chunk version (e.g. 0.163, 0.162) to land in the newest migration bucket; >= 0.149 avoids the `oldSerum1Preset` flag; >= 0.009 avoids the "Patch is Old" warning. [certain on bounds; recommendation-level on values]
 9. Optional: file[0x13] == 'Y' enables extra Audio-In osc handling — **not required**. [certain]
 10. NOT checked anywhere: chunkByteSize@0x04, fxMagic@0x08 ("FPCh" conventional but ignored), fxVersion@0x0C, numParams@0x14, prgName@0x18 (28 bytes), chunkSize@0x34. Bytes after 0x3C+V in the file are ignored. [certain — full-binary scan found no other references]
 

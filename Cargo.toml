@@ -2,7 +2,7 @@
 name = "flp-extract-fxp"
 version = "0.1.0"
 edition = "2024"
-description = "Extract Serum 1 presets (.fxp) embedded in FL Studio project (.flp) files, loadable by Serum 2"
+description = "Extract Serum presets (.fxp) embedded in FL Studio project (.flp) files, loadable by Serum2"
 license = "MIT"
 repository = "https://github.com/pycabbage/flp-extract-fxp/"
 

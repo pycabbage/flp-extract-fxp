@@ -178,7 +178,7 @@ export default function App() {
       const name = convertedFlpFilename(result.fileName)
       downloadBlob(outcome.flp, name)
       toast.success(
-        `Converted ${outcome.convertedCount} Serum 1 instance${outcome.convertedCount === 1 ? "" : "s"}`
+        `Converted ${outcome.convertedCount} Serum instance${outcome.convertedCount === 1 ? "" : "s"}`
       )
       for (const warning of outcome.warnings) {
         toast.warning(warning)
@@ -287,7 +287,7 @@ export default function App() {
                   disabled={converting || rows.length === 0}
                   onClick={handleConvert}
                 >
-                  <RefreshCwIcon /> Convert to Serum 2
+                  <RefreshCwIcon /> Convert to Serum2
                 </Button>
                 {converted && (
                   <>
@@ -295,8 +295,8 @@ export default function App() {
                       <DownloadIcon /> Download converted .flp
                     </Button>
                     <span className="text-muted-foreground text-sm">
-                      Converted {converted.convertedCount} Serum 1 instance
-                      {converted.convertedCount === 1 ? "" : "s"} to Serum 2 (warnings:{" "}
+                      Converted {converted.convertedCount} Serum instance
+                      {converted.convertedCount === 1 ? "" : "s"} to Serum2 (warnings:{" "}
                       {converted.warnings.length})
                     </span>
                   </>

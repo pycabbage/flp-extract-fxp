@@ -1,8 +1,8 @@
-//! Building and validating Serum 1 `.fxp` preset files.
+//! Building and validating Serum `.fxp` preset files.
 //!
 //! File layout (all multi-byte header fields big-endian unless noted),
-//! verified against 25 genuine Serum 1 presets (2015-2026) and against the
-//! Serum 2 importer disassembly (Serum2.vst3 2.0.23, see README):
+//! verified against 25 genuine Serum presets (2015-2026) and against the
+//! Serum2 importer disassembly (Serum2.vst3 2.0.23, see README):
 //!
 //! ```text
 //! 0x00  "CcnK"               chunk magic
@@ -18,15 +18,15 @@
 //! ```
 //!
 //! The trailing `N` (little-endian) is the compressed size of the first zlib
-//! stream; Serum 2's importer uses it to slice the state out of the chunk.
+//! stream; Serum2's importer uses it to slice the state out of the chunk.
 
 pub const FXP_HEADER_LEN: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
-    /// Serum 2 refuses to import the file.
+    /// Serum2 refuses to import the file.
     Fatal,
-    /// The file loads, but deviates from what genuine Serum 1 writes.
+    /// The file loads, but deviates from what genuine Serum writes.
     Warning,
 }
 
@@ -71,7 +71,7 @@ impl ValidationReport {
     }
 }
 
-/// Assemble a complete Serum 1 `.fxp` from a chunk (zlib streams + trailer).
+/// Assemble a complete Serum `.fxp` from a chunk (zlib streams + trailer).
 pub fn build_fxp(chunk: &[u8], preset_name: &str) -> Vec<u8> {
     let total = FXP_HEADER_LEN + chunk.len();
     let mut out = Vec::with_capacity(total);
@@ -97,7 +97,7 @@ pub fn build_fxp(chunk: &[u8], preset_name: &str) -> Vec<u8> {
     out
 }
 
-/// Validate an fxp against the checks the Serum 2 importer performs.
+/// Validate an fxp against the checks the Serum2 importer performs.
 ///
 /// The rule set below mirrors the disassembled import path of
 /// Serum2.vst3 2.0.23 (`load_entry` -> validator -> `s1state_load`); a file
@@ -111,7 +111,7 @@ pub fn validate_fxp(data: &[u8]) -> ValidationReport {
     r
 }
 
-/// Rules reimplemented from the Serum 2 importer. Returns `false` when the
+/// Rules reimplemented from the Serum2 importer. Returns `false` when the
 /// file is too malformed to continue (the report already carries the
 /// fatals); the structural checks are skipped in that case.
 fn check_importer_rules(data: &[u8], r: &mut ValidationReport) -> bool {
@@ -161,7 +161,7 @@ fn check_importer_rules(data: &[u8], r: &mut ValidationReport) -> bool {
         }
         if r.is_ok() {
             let blob = &data[0x3C..(0x3C + n as usize).min(data.len())];
-            // Serum 1 presets store the state zlib-compressed; the loader
+            // Serum presets store the state zlib-compressed; the loader
             // also tolerates raw (uncompressed) state bytes.
             let (state, _consumed): (Vec<u8>, usize) = if blob.first() == Some(&0x78) {
                 match crate::zlibio::inflate(blob, crate::zlibio::MAX_STREAM) {
@@ -188,7 +188,7 @@ fn check_importer_rules(data: &[u8], r: &mut ValidationReport) -> bool {
                     ));
                 } else if state.len() < crate::serum::SERUM1_STATE_SIZE {
                     r.warn(format!(
-                        "decompressed state is {} bytes; Serum 2 zero-pads to {}",
+                        "decompressed state is {} bytes; Serum2 zero-pads to {}",
                         state.len(),
                         crate::serum::SERUM1_STATE_SIZE
                     ));
@@ -205,11 +205,11 @@ fn check_importer_rules(data: &[u8], r: &mut ValidationReport) -> bool {
                         ));
                     } else if ver < 0.009 {
                         r.warn(format!(
-                            "preset version {ver} triggers Serum 2's old-patch warning"
+                            "preset version {ver} triggers Serum2's old-patch warning"
                         ));
                     } else if ver < 0.149 {
                         r.warn(format!(
-                            "preset version {ver} sets Serum 2's oldSerum1Preset compatibility flag"
+                            "preset version {ver} sets Serum2's oldSerum1Preset compatibility flag"
                         ));
                     }
                 } else {
@@ -221,7 +221,7 @@ fn check_importer_rules(data: &[u8], r: &mut ValidationReport) -> bool {
     true
 }
 
-/// Extra structural checks (how genuine Serum 1 files look).
+/// Extra structural checks (how genuine Serum files look).
 fn check_structure(data: &[u8], r: &mut ValidationReport) {
     let byte_size = u32::from_be_bytes(data[4..8].try_into().unwrap()) as usize;
     if byte_size != data.len() {
@@ -246,7 +246,7 @@ fn check_structure(data: &[u8], r: &mut ValidationReport) {
     }
 }
 
-/// Validate a bare chunk (zlib streams + trailer) against the Serum 2 rules
+/// Validate a bare chunk (zlib streams + trailer) against the Serum2 rules
 /// by round-tripping it through the fxp container.
 pub fn validate_chunk_report(chunk: &[u8]) -> ValidationReport {
     validate_fxp(&build_fxp(chunk, ""))

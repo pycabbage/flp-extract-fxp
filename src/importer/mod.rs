@@ -1,7 +1,7 @@
-//! Serum 1 → Serum 2 preset conversion: a faithful re-implementation of
+//! Serum → Serum2 preset conversion: a faithful re-implementation of
 //! Serum2.vst3 2.0.23's `s1state_load` importer (RVA 0x4DABC0–0x4E61CA).
 //!
-//! The importer builds a json tree from a parsed Serum 1 preset state; the
+//! The importer builds a json tree from a parsed Serum preset state; the
 //! tree merged over the init-body skeleton (`s2tables::INIT_BODY`, with
 //! `mpeEnabled` normalized to `Bool(false)`) is byte-identical to the golden
 //! processor records the real importer produces. The golden fixtures are not
@@ -52,7 +52,7 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
         ));
     }
     if !preset.meta.version_f32.is_finite() || preset.meta.version_f32 < 0.002 {
-        return Err("preset is too old for the Serum 2 importer (version < 0.002)".into());
+        return Err("preset is too old for the Serum2 importer (version < 0.002)".into());
     }
     if preset.meta.version_f32 > 0.999 {
         return Err("preset was made with a newer Serum version".into());

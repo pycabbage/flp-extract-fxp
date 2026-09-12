@@ -1,6 +1,6 @@
-# Serum 2 Component State Format (VST3 `IComponent::setState/getState`)
+# Serum2 Component State Format (VST3 `IComponent::setState/getState`)
 
-Status: **verified against real Serum 2.0.23 (x64 Windows) round trips** captured via a
+Status: **verified against real Serum2 2.0.23 (x64 Windows) round trips** captured via a
 ctypes/VST3 harness (`state_experiment.py`, `serum2_probe.py`; see
 `docs/serum2-dynamic-verification.md`). Ground-truth bodies re-decoded in this session:
 
@@ -43,7 +43,7 @@ offset  size  content
 
 ## 2. Body protocol: standard CBOR
 
-The decompressed body is **a single CBOR map with 162 text-keyed entries** — Serum 2's
+The decompressed body is **a single CBOR map with 162 text-keyed entries** — Serum2's
 "plain parameter" serialization (not JSON, not msgpack; `XferJson` refers to the
 *container*, the body itself is CBOR). Byte-level grammar (all three bodies conform):
 
@@ -146,19 +146,19 @@ Verified example — loaded native state (`body_native.bin`, Baby Grand multisam
 ## 3. What "loading a preset" changes — the mapping surface
 
 **Honest caveat about the ground truth:** the `after05` state was captured after
-`setState()` of a real Serum 1 fxp — but the call returned `kResultFalse` and
-Serum 2 **kept the previously loaded native state**. Proof:
+`setState()` of a real Serum fxp — but the call returned `kResultFalse` and
+Serum2 **kept the previously loaded native state**. Proof:
 
 * `body_after05` and `body_native` differ by exactly **one leaf**
   (`Oscillator1.MultiSampleOsc1.files."…XFBabyGrand 06 D#2.flac".sampleRate`, present only in after05);
 * the state captured after setState of `state_06_Serum.bin.01.cid3.bin` (a *different*
-  Serum 1 state) is **byte-identical** to `after05` (same md5 `837c23ce62…`);
+  Serum state) is **byte-identical** to `after05` (same md5 `837c23ce62…`);
   a real YUKIYANAGI conversion cannot contain "Baby Grand" multisample data.
 
-So Serum 2 does **not** import Serum 1 data through `setState`; the plugin must
+So Serum2 does **not** import Serum data through `setState`; the plugin must
 already be given (or generate) a native state. The init↔native-state delta below is
 therefore the mapping surface an offline converter must produce (wavetable-based
-Serum 1 presets would materialize as `WTOsc` sections + table files, cf. §4):
+Serum presets would materialize as `WTOsc` sections + table files, cf. §4):
 
 | section | records (init → loaded) | example changed/added records |
 |---|---|---|
@@ -222,24 +222,24 @@ Arp0 1, tags 1.
 
 ---
 
-## 4. Verdict: what an offline Serum1→Serum2 state converter must produce
+## 4. Verdict: what an offline Serum→Serum2 state converter must produce
 
 **Verdict: (i) — the body is fully converted typed parameters.** There is no raw
-Serum 1 chunk, no embedded wavetable bytes, no base64/zlib, no CBOR byte-strings
-anywhere in any ground-truth body. The plugin does not accept Serum 1 data through
+Serum chunk, no embedded wavetable bytes, no base64/zlib, no CBOR byte-strings
+anywhere in any ground-truth body. The plugin does not accept Serum data through
 `setState` at all (`kResultFalse` in every recorded attempt), so there is no
-"inject raw Serum 1 state" shortcut. Note the flip side: `embedded_sfz` is stored
+"inject raw Serum state" shortcut. Note the flip side: `embedded_sfz` is stored
 as **plain text** inside the body (that is how the Baby Grand multisample rides in a
 state), but sample *audio* never is.
 
 A converter must therefore emit, offline:
 
 1. **Body**: one CBOR map with exactly the 162 keys of §2.2 (the parser in §7 is the
-   ground truth for the shape). Parameter records use Serum 2 `kParamXxx` names
+   ground truth for the shape). Parameter records use Serum2 `kParamXxx` names
    (text keys) with the value encodings of §2 — f32 when exact, else f64; enums as
    text; inactive engines as `{plainParams:"default"}`.
-2. **Serum 1 → Serum 2 parameter mapping** — the part that must be built from
-   Serum 1 fxp params (`docs/serum-fxp-format.md`) into: `OscillatorN.plainParams`
+2. **Serum → Serum2 parameter mapping** — the part that must be built from
+   Serum fxp params (`docs/serum-fxp-format.md`) into: `OscillatorN.plainParams`
    (`kParamEnable`, `kParamVolume`, `kParamType`, loop points, …), `EnvN.plainParams`
    (`kParamAttack/Decay/Sustain/Release`, `kParamCurve1..3`), `LFOk.plainParams` +
    `LFOk.curveData` (`{curveVals, numPoints, xVals, yVals}`, arrays = numPoints+1),
@@ -264,7 +264,7 @@ A converter must therefore emit, offline:
    is the safe target.
 
 Round-trip quirks observed (do not rely on re-serialization for fidelity):
-on `getState` after `setState` of a foreign version-8 state, Serum 2.0.23 re-emits
+on `getState` after `setState` of a foreign version-8 state, Serum2 2.0.23 re-emits
 f64 for f32-exact values after its internal f64 pipeline (`50.0 → 49.99999999999999`),
 bumps `version` 8.0→9.0, and **drops** `PitchQuantizer0.scaleName ('Major' → '')`
 and `scale` entries (`2 → 0`).
@@ -278,7 +278,7 @@ Recompressed `body_native.bin` with python-`zstandard`
 write_dict_id=False)`), for L ∈ {3, 9, 15, 19, 22}; all five streams round-trip
 byte-identically through a standard decompressor and produce frames with
 `window_size = frame_content_size = 455157`, `has_checksum = false`, `dict_id = 0` —
-the same parameter class Serum 2 itself emits (Serum 2's own frame of the same body
+the same parameter class Serum2 itself emits (Serum2's own frame of the same body
 is 33 706 B; L=3 gives 33 660 B, so its producer is roughly a low zstd level).
 Plugin acceptance was **not** tested (no harness run was performed per rules);
 correctness of `md5 hash` + declared size were verified instead.

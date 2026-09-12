@@ -1,4 +1,4 @@
-# Serum 1 → Serum 2 preset conversion — static RE of `Serum2.vst3` 2.0.23
+# Serum → Serum2 preset conversion — static RE of `Serum2.vst3` 2.0.23
 
 Target: `C:\Program Files\Common Files\VST3\Serum2.vst3\Contents\x86_64-win\Serum2.vst3`
 (SHA256 `9293EB90…BF9B3`, ImageBase 0x180000000, all RVAs below = VA − 0x180000000).
@@ -650,7 +650,7 @@ strings/type ids per S1 index are referenced but not enumerable statically;
 ## 12. Sanity check vs. Factory presets — skipped (documented)
 
 `Documents\Xfer\Serum 2 Presets\Presets\Factory\` holds 626 `.SerumPreset`
-files, but none matches a Serum 1 factory name (checked for YUKIYANAGI / UKHC /
+files, but none matches a Serum factory name (checked for YUKIYANAGI / UKHC /
 IMPOSE / Reese-blind etc.); the S1 factory library is not installed on this
 machine (`Tables\User` contains only `SaveYourTablesHere.txt`; `Samples\` holds
 only Factory `.flac` sets). No S1/S2 pair was available, so task 4's empirical

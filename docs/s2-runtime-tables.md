@@ -1,6 +1,6 @@
-# Serum 2 runtime-initialized tables (`Serum2.vst3` 2.0.23) — dumped after `InitDll`
+# Serum2 runtime-initialized tables (`Serum2.vst3` 2.0.23) — dumped after `InitDll`
 
-Companion to `s1-to-s2-mapping.md` (static RE of the Serum-1 preset importer).
+Companion to `s1-to-s2-mapping.md` (static RE of the Serum preset importer).
 That document established that several conversion data tables live in `.data`
 **beyond the file-mapped raw extent** (`.data` VirtSize 0xF82DE4 vs RawSize
 0x99C00) and are therefore **runtime-relocated/filled by `InitDll`** — their
