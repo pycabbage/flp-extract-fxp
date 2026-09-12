@@ -8,10 +8,13 @@
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use flp_extract_fxp::{core::scan_serum_instances, flpconv::scan_convertible_detailed};
+use flp_extract_fxp::{
+    core::scan_serum_instances, flpconv::scan_convertible_detailed, s2tree, serum2state,
+};
+use md5::{Digest, Md5};
 use serde_json::Value;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_flp-extract-fxp");
@@ -1187,4 +1190,192 @@ fn convert_rejects_out_for_multi_member_zip() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--out cannot be used"), "{stderr}");
+}
+
+fn serum_preset_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("serumpreset"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// `extract --serum2` on the real-project fixture writes exactly one
+/// parseable .SerumPreset (the fixture's single genuine Serum2 instance,
+/// controller presetName "Release Cut Piano"). Untracked fixture; skips when
+/// absent.
+#[test]
+fn extract_serum2_writes_preset() {
+    if !have_serina1() {
+        return;
+    }
+    let dir = temp_dir("serum2");
+    let out_dir = dir.join("out");
+    let status = Command::new(BIN)
+        .args(["extract", "--serum2", "-o"])
+        .arg(&out_dir)
+        .arg(serina1_fixture())
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "extract --serum2 failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let presets = serum_preset_files(&out_dir);
+    assert_eq!(presets.len(), 1, "{presets:?}");
+    let data = std::fs::read(&presets[0]).unwrap();
+    let (json, uncomp, format, foff) = serum2state::parse_xfer_json(&data).unwrap();
+    assert_eq!(format, 2);
+    assert!(json.contains("\"fileType\":\"SerumPreset\""), "{json}");
+    assert!(
+        json.contains("\"presetName\":\"Release Cut Piano\""),
+        "{json}"
+    );
+    assert!(json.contains("\"product\":\"Serum2\""), "{json}");
+
+    // hash == md5 of the zstd frame (container rule).
+    let frame = &data[foff..];
+    let mut h = Md5::new();
+    h.update(frame);
+    let expect_hash = format!("{:x}", h.finalize());
+    assert!(
+        json.contains(&format!("\"hash\":\"{expect_hash}\"")),
+        "hash mismatch: {json}"
+    );
+
+    // Body: authored format — 175 top-level keys, engine-type UI keys
+    // present, state-only `component` gone, preset name carried.
+    let body = serum2state::decode_zstd(frame).unwrap();
+    assert_eq!(body.len() as u32, uncomp);
+    let val = s2tree::decode_cbor(&body).unwrap();
+    let keys = val.as_map().expect("top-level map");
+    assert_eq!(keys.len(), 175);
+    assert!(val.get("component").is_none(), "component must be dropped");
+    for k in [
+        "WTOsc",
+        "Osc",
+        "MultiSampleOsc",
+        "SpectralOsc",
+        "GranularOsc",
+        "Filter",
+        "ClipPlayer",
+        "SerumGUI",
+        "fileType",
+        "presetName",
+        "presetAuthor",
+        "presetDescription",
+        "arpBankDisplayName",
+        "clipBankDisplayName",
+        "Oscillator0",
+        "Oscillator4",
+        "ModSlot63",
+        "Global0",
+    ] {
+        assert!(val.get(k).is_some(), "missing authored key {k}");
+    }
+    assert_eq!(
+        val.get("presetName").and_then(s2tree::Val::as_str),
+        Some("Release Cut Piano")
+    );
+
+    // Without the flag, no .SerumPreset files are written.
+    let out_plain = dir.join("out_plain");
+    let status = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_plain)
+        .arg(serina1_fixture())
+        .status()
+        .unwrap();
+    assert!(status.success(), "plain extract failed");
+    assert!(serum_preset_files(&out_plain).is_empty());
+}
+
+/// Structural round-trip over 5 real factory presets: parse → authored Val →
+/// re-encode container → parse again == same Val. Gated behind
+/// `FLPX_S2_CORPUS_DIR` (read-only third-party content; never read in CI).
+#[test]
+fn corpus_preset_round_trip() {
+    let Some(corpus) = std::env::var_os("FLPX_S2_CORPUS_DIR").map(PathBuf::from) else {
+        eprintln!("skipping: FLPX_S2_CORPUS_DIR not set");
+        return;
+    };
+    if !corpus.is_dir() {
+        eprintln!("skipping: corpus dir absent");
+        return;
+    }
+    let mut files: Vec<PathBuf> = globwalk_serum_presets(&corpus);
+    assert!(
+        !files.is_empty(),
+        "no .SerumPreset files under {}",
+        corpus.display()
+    );
+    files.sort();
+    let n = files.len();
+    let picks: Vec<usize> = [0, n / 4, n / 2, 3 * n / 4, n - 1].to_vec();
+    for idx in picks {
+        let path = &files[idx];
+        let data = std::fs::read(path).unwrap();
+        let (json, _, _, foff) = serum2state::parse_xfer_json(&data)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let meta = serum2state::controller_meta_from_json(&json);
+        let original = s2tree::decode_cbor(&serum2state::decode_zstd(&data[foff..]).unwrap())
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let n_keys = original.as_map().unwrap().len();
+        assert!(
+            (174..=178).contains(&n_keys),
+            "{}: unexpected top-level key count {n_keys}",
+            path.display()
+        );
+
+        let rebuilt = serum2state::build_preset_file(
+            &original,
+            serum2state::PresetHeader {
+                preset_name: meta.preset_name,
+                preset_author: meta.preset_author,
+                preset_description: meta.preset_description,
+            },
+        );
+        let (json2, _, _, foff2) = serum2state::parse_xfer_json(&rebuilt).unwrap();
+        let reparsed = s2tree::decode_cbor(&serum2state::decode_zstd(&rebuilt[foff2..]).unwrap())
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(
+            s2tree::encode_cbor(&original),
+            s2tree::encode_cbor(&reparsed),
+            "{}: round-trip body mismatch",
+            path.display()
+        );
+        // The rebuilt container's hash matches its own frame.
+        let mut h = Md5::new();
+        h.update(&rebuilt[foff2..]);
+        assert!(json2.contains(&format!("\"hash\":\"{:x}\"", h.finalize())));
+    }
+}
+
+/// Collect `**/*.SerumPreset` below `dir` without external crates.
+fn globwalk_serum_presets(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("serumpreset"))
+            {
+                out.push(p);
+            }
+        }
+    }
+    out
 }
