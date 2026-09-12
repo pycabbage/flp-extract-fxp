@@ -26,7 +26,8 @@ hold converted Serum2 states.
 ## Pipeline
 
 ```
-FLP file
+input (plain .flp, or zipped loop package → unpacked in memory       src/zip.rs,
+  one document per *.flp member                        core::flp_inputs)
   → locate event 213 (PluginParams) payloads          src/flp.rs, src/flpconv.rs
   → inner cid-3 chunk = Serum chunk                 (zlib streams + u32 LE trailer)
   → s1state::parse_preset → 172,736 B state blob      src/s1state.rs
@@ -37,7 +38,7 @@ FLP file
   → canonical CBOR body                               src/s2tree.rs
   → XferJson processor record                         src/serum2state.rs
         fresh JSON header (productVersion 2.0.23, version 9.0)
-        + md5(frame) + one raw-block zstd frame
+        + md5(frame) + one libzstd level-3 zstd frame
   → XferJson controller record                        src/flpconv.rs
         template docs/data/serum2_controller_record.bin,
         JSON header patched with presetName/presetAuthor/presetDescription
@@ -96,11 +97,31 @@ authoritative description if regeneration is ever needed.
 
 ## Surfaces
 
+Zipped FL Studio loop packages (`PK`-prefixed ZIP) are accepted everywhere a
+plain `.flp` is: `src/zip.rs` unpacks the archive in memory (store + deflate
+entries; encrypted and Zip64 archives are rejected; the combined decompressed
+size is capped at 256 MiB; zip-in-zip is never recursed into) and every
+`*.flp` member — case-insensitive — is processed as its own document
+(`core::flp_inputs`). CLI convert derives per-member output names
+(`<input>_<member>_serum2.flp`), and `--out` requires a single-document
+input; the wasm `convert_flp` exposes one document per member through
+`doc_count` / `doc_name_at` / `flp_at` (`flp` keeps returning the first
+document). Unparseable members inside an archive are skipped with a warning
+instead of aborting.
+
+**Caveat:** no real FL Studio "Zipped loop package" export was available to
+test against (the export needs the FL Studio UI). The reader implements the
+standard ZIP structures such exports use, and every `.flp` entry is probed
+rather than assuming a fixed member layout; confirm against a real export
+when one can be produced.
+
 | Surface | Entry point | Behavior |
 |---|---|---|
 | CLI | `flp-extract-fxp convert <input.flp> [--out <path>] [--dry-run]` | default output `<input>_serum2.flp` next to the input (`--out` accepted for a single input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance |
-| wasm | `convert_flp(data)` and `convert_flp_selected(data, indices)` → `ConvertReport` (`converted_count`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
-| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp`; with preset-table rows selected, only those instances are converted (no selection = all, as before) |
+| CLI | `flp-extract-fxp convert <input.flp|input.zip> [--out <path>] [--dry-run] [--json]` | default output `<input>_serum2.flp` next to the input, or `<input>_<member>_serum2.flp` per archive member (`--out` accepted for a single-document input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance; `--json` prints a structured `ConvertReport` (camelCase keys aligned with the wasm report) on stdout and moves progress to stderr |
+| CLI | `flp-extract-fxp convert-fxp <inputs.fxp...> [--out <dir>] [--overwrite]` | standalone-preset variant (see §convert-fxp below); default output `<stem>.SerumPreset` next to each input; a failing input aborts with an error |
+| wasm | `convert_flp(data)` / `convert_flp_selected(data, indices)` -> `ConvertReport` (`converted_count`, `doc_count`/`doc_name_at`/`flp_at`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
+| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` (a multi-member zip input downloads `<name>-serum2.zip` with one converted .flp per member); with preset-table rows selected, only those instances are converted (no selection = all; selection is a plain-FLP feature, see below) |
 
 ### Per-instance selection (subset conversion)
 
@@ -118,7 +139,12 @@ collects the per-instance warnings. Rules:
 - unselected instances stay byte-identical (`apply` only rewrites planned
   instances) and each one is reported in `warnings_json`;
 - a selected index with no convertible Serum synth behind it (a Serum FX
-  row, an out-of-range index) is reported in `warnings_json` and skipped.
+  row, an out-of-range index) is reported in `warnings_json` and skipped;
+- selection is a **plain-`.flp` feature**: for a zipped loop package the
+  table's row numbers are global across members while plans are per
+  document, so a selection cannot be mapped unambiguously —
+  `convert_flp_selected` rejects archive inputs and the archive is always
+  converted whole.
 
 ## Verification (real Serum2.vst3 2.0.23)
 
@@ -128,9 +154,9 @@ collects the per-instance warnings. Rules:
   at `base+0x4DABC0` with derived args). Unit tests
   `golden_byte_identical_01..05` (`src/importer.rs`) require the Rust
   converter's CBOR bodies to equal them; the fixtures are untracked (see
-  above) and the tests skip when they are absent. The zstd frame differs only
-  in compression level (we emit raw-block frames; the goldens used libzstd
-  level 3) — both are standard frames, and both are accepted by the plugin.
+  above) and the tests skip when they are absent. We emit libzstd level-3
+  zstd frames (`s2tree::zstd_frame`) — the same encoder that produced the
+  goldens, so converted states are byte-comparable end to end.
 - **Dynamic acceptance**: the 5 converted cid-3 processor states inside a
   converted real FLP (`tests/fixtures/serina1.flp`) were fed via `setState` to
   fresh real Serum2 instances: all returned kResultOk (0), all post-load
@@ -170,10 +196,7 @@ warnings/output):
   wavetable/noise data via embedded CBOR byte strings
   (`embeddedWTData`/`embeddedNoiseData`), exactly like the real importer — no
   external files are needed, and nothing is written next to the FLP.
-- **(e) Raw-block zstd frames** (uncompressed) grow the FLP by ~0.4 MB per
-  converted instance compared to Serum2's own compressed frames. The plugin
-  accepts them; smaller frames are a future optimization.
-- **(f) Controller template is 2.0.22-era**: the controller record template
+- **(e) Controller template is 2.0.22-era**: the controller record template
   (`docs/data/serum2_controller_record.bin`, lifted from the genuine Serum2
   instance in the calibration project) gets its JSON header patched per preset
   (preset name/author/description), but its `productVersion` strings remain

@@ -159,6 +159,13 @@ byte-for-byte in the default regions:
 **Set both to the same string** (≤ 27 chars + NUL is always safe; the 0x4972 field
 allows 31). Optional: author at 0x49A0 (48 B), category/menu at 0x49D0 (48 B).
 
+`flp-extract-fxp patch <file.fxp> --name/--author/--category` implements exactly
+this (header mirror + state fields, stream-0 recompressed at zlib level 1,
+trailer/chunkSize/byteSize recomputed, everything else byte-identical); the same
+patching also works on every Serum instance of an FLP
+(`patch project.flp --name … --out …`). Verified dynamically: the real
+Serum2.vst3 `s1state_load` accepts a patched fxp and reports the new name.
+
 ### 4.1 About the JSON metadata block
 
 No `{"author":…,"preset_name":…}` JSON block exists in **any** of the 25 real Serum
