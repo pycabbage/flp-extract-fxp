@@ -88,6 +88,7 @@ silently when absent, so a fresh clone builds and tests green.
 | `tests/fixtures/serina1.flp` | the sample FL Studio project (5 Serum + 1 Serum2) | copy from the local sample library (`assets/`, untracked) |
 | `tests/fixtures/golden_s2/0N_processor_state.bin` | converted processor records produced by the REAL importer | call `s1state_load` at runtime per `docs/s2-runtime-tables.md` (harness method), wrap with `serum2state::build_processor_record`-equivalent container rules |
 | `tests/fixtures/extracted_serum1.fxp` | extraction-feature fixture | `flp-extract-fxp extract` on the sample project, keep preset 01 |
+| `tests/fixtures/legacy/*.fxp` + `*_importer_tree.cbor` | 6 legacy (2015-era) presets and the REAL importer's converted trees for them | call `s1state_load` on each raw fxp chunk (ctypes harness, §Verification), dump the walked tree as canonical CBOR (`*_importer_tree.cbor`) |
 | `docs/data/*.json` | runtime-dumped descriptor / remap / defaults tables | dump per `docs/s2-runtime-tables.md` (LoadLibraryW + InitDll + memory reads) |
 | `C:\Users\cabbage\Documents\Xfer\Serum 2 Presets\Presets\Factory\**\*.SerumPreset` | the 626 real Serum2 factory presets (read-only, never copied into the repo) | shipped with any Serum2 install; the `corpus_preset_round_trip` test reads 5 of them only when `FLPX_S2_CORPUS_DIR` points there |
 | `tools/` | table generator (`gen_s2tables.py`), template extractor, canonical CBOR reference encoder | session scaffolding; `src/s2tables.rs` is committed, so nothing in the repo needs them |
@@ -167,6 +168,7 @@ Verification status — honest:
   where they vary per file. Treat the output as structurally valid until a
   manual load check is done.
 
+
 ## Verification (real Serum2.vst3 2.0.23)
 
 - **Byte-identity vs the real importer**: golden converted states for the 5
@@ -175,9 +177,17 @@ Verification status — honest:
   at `base+0x4DABC0` with derived args). Unit tests
   `golden_byte_identical_01..05` (`src/importer.rs`) require the Rust
   converter's CBOR bodies to equal them; the fixtures are untracked (see
-  above) and the tests skip when they are absent. The zstd frame differs only
-  in compression level (we emit raw-block frames; the goldens used libzstd
-  level 3) — both are standard frames, and both are accepted by the plugin.
+  above) and the tests skip when they are absent. We emit libzstd level-3
+  zstd frames (`s2tree::zstd_frame`) — the same encoder that produced the
+  goldens, so converted states are byte-comparable end to end.
+- **Legacy byte-identity**: the same harness called `s1state_load` on the 6
+  legacy fixtures in `tests/fixtures/legacy/`; the resulting json trees were
+  serialized to canonical CBOR and merged over the init-body skeleton exactly
+  like the modern path. `legacy_golden_fl_*` (`src/importer/tests.rs`)
+  compare the Rust converter's CBOR bodies against them: 4 of 6 byte-identical,
+  `FL_FMItUp` / `FL_BASS_Adventure` differ in the single `RoutingSlot4` leaf
+  (limitation (a)).
+
 - **Dynamic acceptance**: the 5 converted cid-3 processor states inside a
   converted real FLP (`tests/fixtures/serina1.flp`) were fed via `setState` to
   fresh real Serum2 instances: all returned kResultOk (0), all post-load
@@ -196,11 +206,29 @@ Verification status — honest:
 Known and deliberate; none hidden from the user (the tools report them in
 warnings/output):
 
-- **(a) Only modern-format Serum presets** (172,736-byte state blobs,
-  Serum ≥ ~1.2) are converted. Old-format (2015-era, 21,808 / 28,232-byte
-  blobs) presets are rejected by the S1 parser: the wasm/web path leaves the
-  instance untouched with a warning, the CLI aborts the file with an error
-  naming the instance.
+- **(a) Legacy (2015-era) presets are upgraded, with one known per-preset
+  gap**: state blobs of 21,808 / 28,232 bytes (Serum ≈ 1.0.x–1.1, chunk
+  version floats ≈ 0.131–0.1531) are zero-padded to 172,736 bytes — exactly
+  what the real Serum2 importer does — and flow through the standard
+  conversion pipeline, which applies the importer's version-gated legacy
+  migrations (mod-slot dest restamps, per-FX level-out/aux defaults, classic
+  LFO region normalization, version ladders for `serum1Version`/routing/
+  MPE, legacy stream layout `[frames][tuning][noise]`, and the pre-reorder
+  distortion-menu remap). Verified byte-identical (CBOR-body compare against
+  the REAL importer called at runtime, same harness as the modern goldens)
+  for four of the six legacy fixtures in `tests/fixtures/legacy/`
+  (untracked; regenerate with `conv_work/legacy_golden.py`-equivalent calls
+  to `s1state_load`, see §Verification); `FL_FMItUp` (0.147, 21,808 B) and
+  `FL_BASS_Adventure` (0.1531, 28,232 B) each differ in exactly ONE leaf:
+  `RoutingSlot4.kParamRoutingDest` converts to `kRoutingDestMaster` where
+  the real importer produces `kRoutingDestDirect`. The value that drives
+  that slot for legacy presets was not recoverable from the static
+  disassembly nor from any raw blob field (no stored field reproduces the
+  per-fixture pattern), so it is left honest instead of guessed. Covered
+  version floats: 0.1470 and 0.1531 (the two legacy layouts 21,808 B /
+  28,232 B); other legacy versions convert through the same migrations but
+  are not golden-verified.
+
 - **(b) Serum FX instances are not converted** — there is no calibrated
   Serum2-FX FLP template. They are left untouched and reported (warning +
   skipped).
@@ -215,10 +243,8 @@ warnings/output):
   wavetable/noise data via embedded CBOR byte strings
   (`embeddedWTData`/`embeddedNoiseData`), exactly like the real importer — no
   external files are needed, and nothing is written next to the FLP.
-- **(e) Raw-block zstd frames** (uncompressed) grow the FLP by ~0.4 MB per
-  converted instance compared to Serum2's own compressed frames. The plugin
-  accepts them; smaller frames are a future optimization.
-- **(f) Controller template is 2.0.22-era**: the controller record template
+- **(e) Controller template is 2.0.22-era**: the controller record template
+
   (`docs/data/serum2_controller_record.bin`, lifted from the genuine Serum2
   instance in the calibration project) gets its JSON header patched per preset
   (preset name/author/description), but its `productVersion` strings remain

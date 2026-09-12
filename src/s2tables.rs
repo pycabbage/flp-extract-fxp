@@ -2785,9 +2785,9 @@ pub static S2_PARAM_DESCS: &[S2ParamDesc] = &[
         fxtype: -1,
         options: &[
             "kNoWarp",
+            "kSync",
             "kHardSync",
             "kSoftSync",
-            "kSofterSync",
             "kBendPos",
             "kBendNeg",
             "kBendPosNeg",
@@ -2824,9 +2824,9 @@ pub static S2_PARAM_DESCS: &[S2ParamDesc] = &[
         fxtype: -1,
         options: &[
             "kNoWarp",
+            "kSync",
             "kHardSync",
             "kSoftSync",
-            "kSofterSync",
             "kBendPos",
             "kBendNeg",
             "kBendPosNeg",
