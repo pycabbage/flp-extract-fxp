@@ -25,17 +25,34 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
   spawns the actual compiled binary via `CARGO_BIN_EXE_flp-extract-fxp`
   (cargo builds it automatically first; no separate build step needed).
 - Edition 2024 (Cargo.toml) → requires a recent stable Rust toolchain
-  (1.85+). No `rustfmt.toml`/`clippy.toml` in the repo; there's also no CI
-  job running `cargo test`/`clippy`/`fmt` (the only workflow is
-  `.github/workflows/pages.yml`, which just builds the wasm+frontend and
-  deploys). Run `cargo test` yourself before considering work done.
-- Only dependencies are `clap`, `flate2` and `md-5` (native); `wasm-bindgen`
-  is a target-specific dep for `wasm32-unknown-unknown` only, `ruzstd` is a
-  dev-dependency (test-only zstd decoding). Keep new dependencies wasm32-safe
+  (1.85+). Workflows: `.github/workflows/pages.yml` (builds the wasm +
+  frontend and deploys to Pages), `.github/workflows/rust.yml` (cargo
+  fmt/clippy/test), and `.github/workflows/release.yml` (on `v*` tag
+  pushes matrix-builds the CLI for win64 / linux64 / macOS x64+arm64,
+  packages binary + README.md as `flp-extract-fxp-{version}-{target}.zip`
+  and attaches them to a GitHub Release with generated notes — wasm is
+  NOT distributed, the web UI ships via Pages). Run `cargo test` yourself
+  before considering work done.
+- Only dependencies are `clap`, `flate2`, `md-5`, `zstd`, `serde` and `serde_json` (the last two power the `--json` CLI reports; all wasm32-safe);
+  `wasm-bindgen` is a target-specific dep for `wasm32-unknown-unknown` only,
+  `ruzstd` is a dev-dependency (test-only zstd decoding). Keep new
+  dependencies wasm32-safe
   — the conversion stack must compile identically for both targets.
-- CLI subcommands: `list`, `extract`, `validate`, and
+- CLI subcommands: `list`, `extract`, `validate`,
   `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum instances
-  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`).
+  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`), and
+  `patch <input.fxp|.flp> [--name|--author|--category] [--out] [--dry-run]`
+  (rewrites preset metadata in an fxp or in every Serum instance of an FLP;
+  name goes to prgName@0x1C AND state@0x4972, stream 0 is recompressed at
+  zlib level 1, trailer/chunkSize/byteSize recomputed — `src/fxp.rs`
+  `patch_metadata`/`patch_chunk_fields`, FLP path `src/flpconv.rs`
+  `patch_serum_metadata`). Every subcommand takes `--json`: stdout then
+  carries exactly one JSON document (the structured report from
+  `src/report.rs`, camelCase keys aligned with the wasm report fields),
+  human-readable progress moves to stderr, and a command that completes but
+  fails still prints its full report with an embedded `"error"` field before
+  exiting 1 (aborting errors print `{"error": "..."}` instead). Without
+  `--json` the historical output is unchanged.
 - Input resolution (`resolve_inputs` in `src/main.rs`, used by
   `list`/`extract`/`convert`): files pass through; directories are walked
   recursively with plain `std::fs` collecting `.flp` case-insensitively;
@@ -48,12 +65,13 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 
 ## Frontend + wasm (`front/`)
 
-- **Critical, non-obvious**: `front/src/lib/wasm.ts` imports
-  `../../pkg/flp_extract_fxp.js`. That `front/pkg/` directory is
-  **gitignored and not checked in** — it must be generated with
-  `wasm-pack` before `pnpm dev`/`pnpm build` will even typecheck:
+- **Critical, non-obvious**: `front/package.json` depends on
+  `"flp-extract-fxp": "link:../pkg"`, i.e. the generated wasm package at the
+  **repo-root `pkg/` directory** (gitignored, not checked in). It must be
+  generated with `wasm-pack` before `pnpm dev`/`pnpm build` will even
+  typecheck:
   ```sh
-  wasm-pack build --target web --out-dir front/pkg --out-name flp_extract_fxp .
+  wasm-pack build --target web --out-dir pkg --out-name flp_extract_fxp .
   ```
   Run this from the **repo root** (not `front/`), matching
   `.github/workflows/pages.yml`. Requires the `wasm32-unknown-unknown`
@@ -61,7 +79,7 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 - Package manager is **pnpm** (`front/pnpm-lock.yaml`, lockfile v9). CI uses
   `pnpm/action-setup@v4` with version `12` and Node 22.
 - From `front/`: `pnpm install`, `pnpm dev`, `pnpm build` (= `tsc -b && vite
-  build`, needs `front/pkg/` to exist first), `pnpm preview`. There is no
+  build`, needs the repo-root `pkg/` to exist first), `pnpm preview`. There is no
   separate format script — `pnpm lint` runs `oxlint --fix` and `oxfmt`
   concurrently (auto-fixing lint issues and formatting in one command; not
   eslint/prettier). Type-aware lint rules are on (`oxlint-tsgolint`, see
@@ -108,14 +126,22 @@ docs above):
   0x49D0).
 - Serum2 plugin instances are intentionally never extracted (they use an
   `XferJson`-prefixed state, not the Serum chunk layout) — only counted.
-- Zip-packed FLPs (`PK`-prefixed "loop package" exports) are unsupported by
-  design; the FLP must be extracted first.
+- Zipped loop packages (`PK`-prefixed ZIP exports) are unpacked in memory by
+  `src/zip.rs` (minimal ZIP reader: store + deflate entries via flate2;
+  encrypted and Zip64 archives are rejected with explicit errors; 256 MiB
+  total decompressed cap; zip-in-zip is never recursed into) and every
+  `*.flp` member (case-insensitive) is processed as its own document
+  (`core::flp_inputs`). Verified only against synthetic archives — no real
+  FL Studio loop-package sample was available (the export needs the FL UI);
+  confirm entry layout/compression against a real export when one can be
+  produced (see docs/flp-conversion.md → Surfaces).
 - `src/importer.rs` correctness is proven by **byte-identity tests** against
   golden states produced by the REAL importer (called at runtime). Do not
   "simplify" importer logic without re-running those tests.
-- Converted processor states use **raw-block zstd frames** (uncompressed) on
-  purpose — plugin-accepted; the goldens use libzstd level 3, both are
-  standard frames. Smaller frames are future work, not a bug to fix.
+- Converted processor states use **libzstd level-3 zstd frames** (`zstd`
+  crate, `s2tree::zstd_frame`) — plugin-accepted (dynamically verified).
+  libzstd compiles C code, so the wasm32 build needs clang (CI installs it in
+  `pages.yml`; locally put `C:\Program Files\LLVM\bin` on PATH).
 
 ## Tests
 
