@@ -18,6 +18,7 @@
 use clap::{Parser, Subcommand};
 use flp_extract_fxp::core::{
     self, default_out_dir, format_bytes, hash_bytes, sanitize_filename, scan_serum_instances,
+    scan_serum2_instances,
 };
 use flp_extract_fxp::flpconv::BundleSource;
 use flp_extract_fxp::report::{
@@ -25,9 +26,14 @@ use flp_extract_fxp::report::{
     ExtractInputReport, ExtractReport, ExtractStatus, ListInputReport, ListReport, PatchReport,
     PresetEntry, ValidateInputReport, ValidateReport,
 };
-use flp_extract_fxp::{flpconv, fxp, serum};
+use flp_extract_fxp::{flpconv, fxp, serum, serum2state};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// Fallback label for report messages (`-` when empty).
+fn display_name(name: &str) -> &str {
+    if name.is_empty() { "-" } else { name }
+}
 
 #[derive(Parser)]
 #[command(
@@ -64,6 +70,9 @@ enum Command {
         /// Keep extracting even when a preset fails Serum2 validation.
         #[arg(long)]
         keep_invalid: bool,
+        /// Also extract Serum2 instances as .SerumPreset preset files.
+        #[arg(long)]
+        serum2: bool,
         /// Print a machine-readable JSON report on stdout (progress goes
         /// to stderr).
         #[arg(long)]
@@ -170,6 +179,7 @@ fn run_extract(
     out_dir_opt: Option<&PathBuf>,
     overwrite: bool,
     keep_invalid: bool,
+    serum2: bool,
     out: &Out,
 ) -> Result<ExtractReport, String> {
     let mut input_reports: Vec<ExtractInputReport> = Vec::new();
@@ -199,7 +209,34 @@ fn run_extract(
             for msg in &stats.failed {
                 print_warning(doc, msg);
             }
-            if instances.is_empty() {
+            // Serum2 instances: only scanned (and extracted) with --serum2.
+            let s2_instances = if serum2 {
+                let (insts, warnings) = match scan_serum2_instances(&doc.data) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if doc.from_archive {
+                            eprintln!("warning: skipping {}: {e}", doc.name);
+                            (Vec::new(), Vec::new())
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
+                for msg in &warnings {
+                    print_warning(doc, msg);
+                }
+                insts
+            } else {
+                Vec::new()
+            };
+            // When --serum2 is active, instances that failed to produce a
+            // .SerumPreset are counted here instead of the raw scan count.
+            let mut serum2_skipped = if serum2 {
+                0u32
+            } else {
+                stats.serum2_count as u32
+            };
+            if instances.is_empty() && s2_instances.is_empty() {
                 eprintln!(
                     "{}: no Serum presets found ({} Serum2 instance(s) skipped)",
                     doc.name, stats.serum2_count
@@ -210,21 +247,26 @@ fn run_extract(
                     entries: Vec::new(),
                     extracted_count: 0,
                     failed: stats.failed,
-                    serum2_skipped: stats.serum2_count as u32,
+                    serum2_skipped,
                 });
                 continue;
             }
             std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
-            out.line(&format!(
-                "{}: {} Serum preset(s){}",
-                doc.name,
-                instances.len(),
-                if stats.serum2_count > 0 {
-                    format!(", {} Serum2 instance(s) skipped", stats.serum2_count)
-                } else {
-                    String::new()
-                }
-            ));
+            if !serum2 && stats.serum2_count > 0 {
+                out.line(&format!(
+                    "{}: {} Serum preset(s), {} Serum2 instance(s) skipped",
+                    doc.name,
+                    instances.len(),
+                    stats.serum2_count
+                ));
+            } else {
+                out.line(&format!(
+                    "{}: {} Serum preset(s), {} Serum2 preset(s)",
+                    doc.name,
+                    instances.len(),
+                    s2_instances.len()
+                ));
+            }
             let mut entries: Vec<ExtractEntry> = Vec::with_capacity(instances.len());
             let mut extracted_count = 0u32;
             for (i, inst) in instances.iter().enumerate() {
@@ -344,13 +386,94 @@ fn run_extract(
                 }
                 push_entry(ExtractStatus::Written, Some(path.display().to_string()));
             }
+
+            // --serum2: write one .SerumPreset per Serum2 instance.
+            let mut used_s2: HashMap<String, usize> = HashMap::new();
+            for (j, s2) in s2_instances.iter().enumerate() {
+                let i = instances.len() + j;
+                let file_bytes =
+                    match serum2state::preset_file_from_processor(&s2.processor, s2.meta.clone()) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            out.line(&format!(
+                                "  [S2 {:02}] skipped a Serum2 instance (channel '{}'): {e}",
+                                j + 1,
+                                if s2.channel_name.is_empty() {
+                                    "-"
+                                } else {
+                                    &s2.channel_name
+                                }
+                            ));
+                            serum2_skipped += 1;
+                            continue;
+                        }
+                    };
+                let base_name = if !s2.meta.preset_name.is_empty() {
+                    s2.meta.preset_name.clone()
+                } else {
+                    format!("Instance {}", j + 1)
+                };
+                let base = sanitize_filename(&base_name);
+                let count = used_s2.entry(base.clone()).or_insert(0);
+                *count += 1;
+                let file_name = if *count == 1 {
+                    format!("{:02}_{base}.SerumPreset", i + 1)
+                } else {
+                    format!("{:02}_{base}_{count}.SerumPreset", i + 1)
+                };
+                let path = out_dir.join(&file_name);
+                let (status, written_path) = if path.exists() && !overwrite {
+                    out.line(&format!(
+                        "  [S2 {:02}] {} exists, skipped (use --overwrite)",
+                        j + 1,
+                        path.display()
+                    ));
+                    (ExtractStatus::Exists, None)
+                } else {
+                    std::fs::write(&path, &file_bytes)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                    total_extracted += 1;
+                    extracted_count += 1;
+                    out.line(&format!(
+                        "  [S2 {:02}] channel '{}' -> preset '{}' by '{}' ({} B) => {}",
+                        j + 1,
+                        if s2.channel_name.is_empty() {
+                            "-"
+                        } else {
+                            &s2.channel_name
+                        },
+                        display_name(&s2.meta.preset_name),
+                        display_name(&s2.meta.preset_author),
+                        file_bytes.len(),
+                        path.display()
+                    ));
+                    (ExtractStatus::Written, Some(path.display().to_string()))
+                };
+                entries.push(ExtractEntry {
+                    index: i as u32,
+                    channel: s2.channel,
+                    channel_name: s2.channel_name.clone(),
+                    preset_name: s2.meta.preset_name.clone(),
+                    author: s2.meta.preset_author.clone(),
+                    category: String::new(),
+                    version_f32: 0.0,
+                    state_bytes: file_bytes.len(),
+                    chunk_bytes: s2.processor.len(),
+                    source: "Serum2".to_string(),
+                    status,
+                    path: written_path,
+                    valid: true,
+                    warnings: Vec::new(),
+                    errors: Vec::new(),
+                });
+            }
             input_reports.push(ExtractInputReport {
                 input: doc.name.clone(),
                 out_dir: out_dir.display().to_string(),
                 extracted_count,
                 entries,
                 failed: stats.failed,
-                serum2_skipped: stats.serum2_count as u32,
+                serum2_skipped,
             });
         }
     }
@@ -1071,9 +1194,17 @@ fn main() {
             out: out_dir,
             overwrite,
             keep_invalid,
+            serum2,
             ..
-        } => run_extract(inputs, out_dir.as_ref(), *overwrite, *keep_invalid, &out)
-            .map(AnyReport::Extract),
+        } => run_extract(
+            inputs,
+            out_dir.as_ref(),
+            *overwrite,
+            *keep_invalid,
+            *serum2,
+            &out,
+        )
+        .map(AnyReport::Extract),
         Command::Validate { inputs, .. } => run_validate(inputs, &out).map(AnyReport::Validate),
         Command::Convert {
             inputs,
