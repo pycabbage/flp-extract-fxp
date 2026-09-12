@@ -33,14 +33,21 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
   and attaches them to a GitHub Release with generated notes — wasm is
   NOT distributed, the web UI ships via Pages). Run `cargo test` yourself
   before considering work done.
-- Only dependencies are `clap`, `flate2`, `md-5` and `zstd` (native);
+- Only dependencies are `clap`, `flate2`, `md-5`, `zstd`, `serde` and `serde_json` (the last two power the `--json` CLI reports; all wasm32-safe);
   `wasm-bindgen` is a target-specific dep for `wasm32-unknown-unknown` only,
   `ruzstd` is a dev-dependency (test-only zstd decoding). Keep new
   dependencies wasm32-safe
   — the conversion stack must compile identically for both targets.
 - CLI subcommands: `list`, `extract`, `validate`, and
   `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum instances
-  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`).
+  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`). Every
+  subcommand takes `--json`: stdout then carries exactly one JSON document
+  (the structured report from `src/report.rs`, camelCase keys aligned with
+  the wasm report fields), human-readable progress moves to stderr, and a
+  command that completes but fails still prints its full report with an
+  embedded `"error"` field before exiting 1 (aborting errors print
+  `{"error": "..."}` instead). Without `--json` the historical output is
+  unchanged.
 
 ## Frontend + wasm (`front/`)
 

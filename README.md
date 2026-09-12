@@ -13,7 +13,7 @@ FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum
 cargo build --release
 ```
 
-実行ファイル: `target/release/flp-extract-fxp` (Windows では `.exe`)。依存は clap 4、flate2、md-5。
+実行ファイル: `target/release/flp-extract-fxp` (Windows では `.exe`)。依存は clap 4、flate2、md-5、serde / serde_json (`--json` 出力用)。
 
 ### ビルド済みバイナリ
 
@@ -69,6 +69,20 @@ flp-extract-fxp convert --dry-run a.flp
 FLP 内の Serum (シンセ) インスタンスごとにプリセット状態を Serum2 形式へ完全変換し、プラグインスロットを Serum2 に書き換えます。変換後の FLP を FL Studio で開くと Serum2 が既に読み込まれた状態になり、手作業のプラグイン差し替え + fxp インポートが不要になります。ウェーブテーブルデータは変換後の状態に埋め込まれるため、追加ファイルは不要です。
 
 再生には実際の Serum2 (VST3) のインストールが必要です。Web UI にも同じ変換があり、「Convert to Serum2」ボタンでブラウザ内で変換し `<名前>-serum2.flp` としてダウンロードできます。パイプラインと検証方法の詳細は [docs/flp-conversion.md](docs/flp-conversion.md) を参照してください。
+
+### `--json` — 機械可読出力 (全サブコマンド共通)
+
+```sh
+flp-extract-fxp list --json "path/to/project.flp"
+```
+
+`list` / `extract` / `validate` / `convert` のすべてに `--json` フラグがあります。付けた場合、stdout には**単一の JSON ドキュメント** (整形出力) だけが出力され、人間可読の進行状況はすべて stderr に移ります。
+
+- JSON はコマンドごとに構造化されたレポートで、キー名は camelCase で Web 版 (wasm) のレポート項目 (`presets` / `failed` / `serum2Skipped` / `valid` / `warnings` / `errors` / `convertedCount` / `details` など) と揃えてあります。スクリプトや CI で CLI と Web 版の出力を共通して扱えます
+- コマンドが最後まで走ったが失敗で終わる場合 (例: `validate` で FAIL、`extract` で全件スキップ) でも完全なレポートを出力し、トップレベルに `"error": "..."` を付けた上で終了コード 1 で終わります
+- 中断を伴う致命的エラー (入力ファイルが読めない、FLP として解析不能など) では `{"error": "..."}` のみを stdout に出し、終了コード 1 で終わります
+
+`--json` を付けない場合の出力は従来通りです。
 
 ## 出力ファイル名
 
@@ -142,6 +156,6 @@ Serum2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外で�
 cargo test
 ```
 
-ユニットテスト (FLP パーサ / 状態解析 / fxp 構築・検証) に加え、合成 FLP からの `extract` → `validate` を実行する統合テスト (`tests/integration.rs`) と、実フィクスチャ fxp の検証テストを含みます。
+ユニットテスト (FLP パーサ / 状態解析 / fxp 構築・検証) に加え、合成 FLP からの `extract` → `validate` を実行する統合テスト (`tests/integration.rs`)、全サブコマンドの `--json` 出力をパースして構造を検証する統合テスト、実フィクスチャ fxp の検証テストを含みます。
 
 `convert` は 5 プリセット分の golden 変換状態 (`tests/fixtures/golden_s2/`、実インポータが生成したもの) とのバイト一致テストと、実プロジェクト (`tests/fixtures/serina1.flp`) を変換した FLP の再スキャン / 差分テストで検証します。
