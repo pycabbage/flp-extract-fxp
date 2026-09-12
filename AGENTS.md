@@ -40,7 +40,14 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
   — the conversion stack must compile identically for both targets.
 - CLI subcommands: `list`, `extract`, `validate`, and
   `convert <input.flp> [--out <path>] [--dry-run]` (rewrites Serum instances
-  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`).
+  inside an FLP as Serum2 instances; see `docs/flp-conversion.md`). Every
+  subcommand takes `--json`: stdout then carries exactly one JSON document
+  (the structured report from `src/report.rs`, camelCase keys aligned with
+  the wasm report fields), human-readable progress moves to stderr, and a
+  command that completes but fails still prints its full report with an
+  embedded `"error"` field before exiting 1 (aborting errors print
+  `{"error": "..."}` instead). Without `--json` the historical output is
+  unchanged.
 
 ## Frontend + wasm (`front/`)
 
