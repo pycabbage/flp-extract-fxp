@@ -51,12 +51,13 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 
 ## Frontend + wasm (`front/`)
 
-- **Critical, non-obvious**: `front/src/lib/wasm.ts` imports
-  `../../pkg/flp_extract_fxp.js`. That `front/pkg/` directory is
-  **gitignored and not checked in** — it must be generated with
-  `wasm-pack` before `pnpm dev`/`pnpm build` will even typecheck:
+- **Critical, non-obvious**: `front/package.json` depends on
+  `"flp-extract-fxp": "link:../pkg"`, i.e. the generated wasm package at the
+  **repo-root `pkg/` directory** (gitignored, not checked in). It must be
+  generated with `wasm-pack` before `pnpm dev`/`pnpm build` will even
+  typecheck:
   ```sh
-  wasm-pack build --target web --out-dir front/pkg --out-name flp_extract_fxp .
+  wasm-pack build --target web --out-dir pkg --out-name flp_extract_fxp .
   ```
   Run this from the **repo root** (not `front/`), matching
   `.github/workflows/pages.yml`. Requires the `wasm32-unknown-unknown`
@@ -64,7 +65,7 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 - Package manager is **pnpm** (`front/pnpm-lock.yaml`, lockfile v9). CI uses
   `pnpm/action-setup@v4` with version `12` and Node 22.
 - From `front/`: `pnpm install`, `pnpm dev`, `pnpm build` (= `tsc -b && vite
-  build`, needs `front/pkg/` to exist first), `pnpm preview`. There is no
+  build`, needs the repo-root `pkg/` to exist first), `pnpm preview`. There is no
   separate format script — `pnpm lint` runs `oxlint --fix` and `oxfmt`
   concurrently (auto-fixing lint issues and formatting in one command; not
   eslint/prettier). Type-aware lint rules are on (`oxlint-tsgolint`, see
@@ -111,8 +112,15 @@ docs above):
   0x49D0).
 - Serum2 plugin instances are intentionally never extracted (they use an
   `XferJson`-prefixed state, not the Serum chunk layout) — only counted.
-- Zip-packed FLPs (`PK`-prefixed "loop package" exports) are unsupported by
-  design; the FLP must be extracted first.
+- Zipped loop packages (`PK`-prefixed ZIP exports) are unpacked in memory by
+  `src/zip.rs` (minimal ZIP reader: store + deflate entries via flate2;
+  encrypted and Zip64 archives are rejected with explicit errors; 256 MiB
+  total decompressed cap; zip-in-zip is never recursed into) and every
+  `*.flp` member (case-insensitive) is processed as its own document
+  (`core::flp_inputs`). Verified only against synthetic archives — no real
+  FL Studio loop-package sample was available (the export needs the FL UI);
+  confirm entry layout/compression against a real export when one can be
+  produced (see docs/flp-conversion.md → Surfaces).
 - `src/importer.rs` correctness is proven by **byte-identity tests** against
   golden states produced by the REAL importer (called at runtime). Do not
   "simplify" importer logic without re-running those tests.

@@ -14,6 +14,8 @@
 //!   small text / filename / hashing helpers shared by the CLI and wasm.
 //! - [`report`]: structured `--json` CLI report types (serde; camelCase
 //!   keys aligned with the wasm report fields).
+//! - [`zip`]: minimal in-memory ZIP reader for zipped loop packages
+//!   (store + deflate; encrypted / Zip64 rejected).
 //! - [`zlibio`]: shared zlib inflate + Serum chunk stream splitting.
 //! - [`flpconv`]: FLP byte surgery rewriting Serum event-213 payloads
 //!   into Serum2 ones (plan / bundle / apply pipeline).
@@ -36,6 +38,7 @@ pub mod flpconv;
 pub mod fxp;
 pub mod report;
 pub mod serum;
+pub mod zip;
 pub mod zlibio;
 
 pub mod importer;

@@ -26,7 +26,8 @@ hold converted Serum2 states.
 ## Pipeline
 
 ```
-FLP file
+input (plain .flp, or zipped loop package → unpacked in memory       src/zip.rs,
+  one document per *.flp member                        core::flp_inputs)
   → locate event 213 (PluginParams) payloads          src/flp.rs, src/flpconv.rs
   → inner cid-3 chunk = Serum chunk                 (zlib streams + u32 LE trailer)
   → s1state::parse_preset → 172,736 B state blob      src/s1state.rs
@@ -96,11 +97,29 @@ authoritative description if regeneration is ever needed.
 
 ## Surfaces
 
+Zipped FL Studio loop packages (`PK`-prefixed ZIP) are accepted everywhere a
+plain `.flp` is: `src/zip.rs` unpacks the archive in memory (store + deflate
+entries; encrypted and Zip64 archives are rejected; the combined decompressed
+size is capped at 256 MiB; zip-in-zip is never recursed into) and every
+`*.flp` member — case-insensitive — is processed as its own document
+(`core::flp_inputs`). CLI convert derives per-member output names
+(`<input>_<member>_serum2.flp`), and `--out` requires a single-document
+input; the wasm `convert_flp` exposes one document per member through
+`doc_count` / `doc_name_at` / `flp_at` (`flp` keeps returning the first
+document). Unparseable members inside an archive are skipped with a warning
+instead of aborting.
+
+**Caveat:** no real FL Studio "Zipped loop package" export was available to
+test against (the export needs the FL Studio UI). The reader implements the
+standard ZIP structures such exports use, and every `.flp` entry is probed
+rather than assuming a fixed member layout; confirm against a real export
+when one can be produced.
+
 | Surface | Entry point | Behavior |
 |---|---|---|
-| CLI | `flp-extract-fxp convert <input.flp> [--out <path>] [--dry-run] [--json]` | default output `<input>_serum2.flp` next to the input (`--out` accepted for a single input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance; `--json` prints a structured `ConvertReport` (camelCase keys aligned with the wasm report) on stdout and moves progress to stderr |
-| wasm | `convert_flp(data) -> ConvertReport` (`converted_count`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
-| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` |
+| CLI | `flp-extract-fxp convert <input.flp|input.zip> [--out <path>] [--dry-run] [--json]` | default output `<input>_serum2.flp` next to the input, or `<input>_<member>_serum2.flp` per archive member (`--out` accepted for a single-document input only); `--dry-run` prints the per-instance plan without writing; an instance that fails to convert aborts the file with an error naming the instance; `--json` prints a structured `ConvertReport` (camelCase keys aligned with the wasm report) on stdout and moves progress to stderr |
+| wasm | `convert_flp(data) -> ConvertReport` (`converted_count`, `doc_count`/`doc_name_at`/`flp_at`, `flp`, `warnings_json`, `details_json`) | per-instance failures become warnings in the report; those instances are left as Serum |
+| web | "Convert to Serum2" button in the browser UI | converts in-browser, then downloads `<name>-serum2.flp` (a multi-member zip input downloads `<name>-serum2.zip` with one converted .flp per member) |
 
 ## Verification (real Serum2.vst3 2.0.23)
 
