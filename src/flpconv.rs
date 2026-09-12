@@ -521,6 +521,204 @@ pub fn apply(
 }
 
 // ---------------------------------------------------------------------------
+// Metadata patching (Serum instances inside an FLP)
+// ---------------------------------------------------------------------------
+
+/// One patched Serum instance, for the human report.
+#[derive(Debug, Clone)]
+pub struct PatchedInstance {
+    pub channel: Option<u16>,
+    pub channel_name: String,
+    /// Preset name before the patch (may be empty when unreadable).
+    pub old_preset_name: String,
+    /// Preset name after the patch (equals the old one when no Name patch).
+    pub new_preset_name: String,
+}
+
+/// Result of [`patch_serum_metadata`]: what was rewritten plus non-fatal notes.
+#[derive(Debug, Default)]
+pub struct FlpPatchReport {
+    pub patched: Vec<PatchedInstance>,
+    pub warnings: Vec<String>,
+}
+
+/// Patch metadata in every Serum synth instance of an FLP, in memory.
+///
+/// For each Serum instance the inner cid-3 preset chunk is inflated, the
+/// fields are rewritten ([`fxp::patch_chunk_fields`]) and the chunk is
+/// spliced back with fresh record framing and a fixed FLdt u32 length.
+/// Non-plugin events and everything before the FLdt payload stay
+/// byte-identical. Instances whose state cannot be patched are skipped with
+/// a warning (never aborts).
+pub fn patch_serum_metadata(
+    buf: &[u8],
+    patches: &[fxp::PatchField],
+) -> Result<(Vec<u8>, FlpPatchReport), String> {
+    if patches.is_empty() {
+        return Err("nothing to patch (empty patch list)".into());
+    }
+    let spans = flp::parse_event_spans(buf)?;
+    let (_, dt_len_pos, dt_start, _) = locate_chunks(buf)?;
+
+    // Channel bookkeeping identical to scan_convertible_detailed.
+    let mut channels: HashMap<u16, String> = HashMap::new();
+    let mut cur_channel: Option<u16> = None;
+    let mut cur_fx_name = String::new();
+    let mut replacements: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut report = FlpPatchReport::default();
+
+    for (i, (_off, ev)) in spans.iter().enumerate() {
+        match ev.id {
+            flp::EV_NEW_CHANNEL => {
+                if ev.data.len() >= 2 {
+                    cur_channel = Some(u16::from_le_bytes([ev.data[0], ev.data[1]]));
+                }
+            }
+            flp::EV_TEXT_CHANNEL_NAME => {
+                if let Some(ch) = cur_channel {
+                    channels.insert(ch, text(ev.data));
+                }
+            }
+            flp::EV_TEXT_FX_TRACK_NAME => {
+                cur_fx_name = text(ev.data);
+            }
+            flp::EV_PLUGIN_PARAMS => {
+                let Ok(pp) = flp::parse_plugin_params(ev.data) else {
+                    continue;
+                };
+                if serum::is_serum2(pp.name, pp.filename) {
+                    continue;
+                }
+                let where_ = cur_channel
+                    .and_then(|c| channels.get(&c).cloned())
+                    .unwrap_or_else(|| cur_fx_name.clone());
+                if serum::is_serum_fx(pp.name, pp.filename) {
+                    report.warnings.push(format!(
+                        "Serum FX instance on channel '{where_}' left untouched"
+                    ));
+                    continue;
+                }
+                if !serum::is_serum1_synth(pp.name, pp.filename) || pp.state.is_empty() {
+                    continue;
+                }
+                let old_name = serum::serum1_chunk_from_state(pp.state)
+                    .map(|c| c.meta.preset_name)
+                    .unwrap_or_default();
+                let new_payload = match patch_event_payload(ev.data, patches) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        report.warnings.push(format!(
+                            "instance on channel '{}': {e}",
+                            display_name(&where_)
+                        ));
+                        continue;
+                    }
+                };
+                replacements.insert(i, new_payload);
+                let new_name = match patches.iter().rev().find_map(|p| match p {
+                    fxp::PatchField::Name(s) => Some(s.clone()),
+                    _ => None,
+                }) {
+                    Some(s) => {
+                        let mut b = s.as_bytes().to_vec();
+                        b.truncate(31);
+                        while std::str::from_utf8(&b).is_err() {
+                            b.pop();
+                        }
+                        String::from_utf8_lossy(&b).into_owned()
+                    }
+                    None => old_name.clone(),
+                };
+                report.patched.push(PatchedInstance {
+                    channel: cur_channel,
+                    channel_name: where_,
+                    old_preset_name: old_name,
+                    new_preset_name: new_name,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Splice: everything before the FLdt payload verbatim, re-emit each
+    // event (replaced ones with fresh framing), then fix the FLdt length.
+    let mut out: Vec<u8> = Vec::with_capacity(buf.len() + 4096);
+    out.extend_from_slice(&buf[..dt_start]);
+    for (i, (_off, ev)) in spans.iter().enumerate() {
+        match replacements.get(&i) {
+            Some(new_payload) => {
+                out.push(flp::EV_PLUGIN_PARAMS);
+                push_varint(&mut out, new_payload.len());
+                out.extend_from_slice(new_payload);
+            }
+            None => {
+                let pstart = ev.data.as_ptr() as usize - buf.as_ptr() as usize;
+                out.extend_from_slice(&buf[*_off..pstart + ev.data.len()]);
+            }
+        }
+    }
+    let new_dtlen = out.len() - dt_start;
+    out[dt_len_pos..dt_len_pos + 4].copy_from_slice(&(new_dtlen as u32).to_le_bytes());
+    Ok((out, report))
+}
+
+/// Replace the inner cid-3 chunk of a PluginParams payload with its patched
+/// version; every other record and the record order stay verbatim.
+fn patch_event_payload(orig: &[u8], patches: &[fxp::PatchField]) -> Result<Vec<u8>, String> {
+    if orig.len() < 4 {
+        return Err("PluginParams payload too small".into());
+    }
+    let version = u32::from_le_bytes(orig[0..4].try_into().unwrap());
+    if version < 5 {
+        return Err(format!(
+            "PluginParams version {version} predates the chunked layout"
+        ));
+    }
+    let recs = parse_record_seq(orig, 4)?;
+    let Some(cid53) = record_data(orig, &recs, 53) else {
+        return Err("missing cid 53 record".into());
+    };
+    // The FL VST3 wrapper is [u32 prologue][records...] — find the record
+    // start the same way serum::fl_vst3_wrapper_cid3 does.
+    let mut wstart = None;
+    for s in 0..=8usize {
+        if cid53.len() >= s && parse_record_seq(cid53, s).is_ok() {
+            wstart = Some(s);
+            break;
+        }
+    }
+    let Some(wstart) = wstart else {
+        return Err("cid 53 wrapper records do not parse".into());
+    };
+    let wrecs = parse_record_seq(cid53, wstart)?;
+    let Some(inner3) = record_data(cid53, &wrecs, 3) else {
+        return Err("missing inner cid 3 record".into());
+    };
+    let new_cid3 = fxp::patch_chunk_fields(inner3, patches)?;
+    let mut w = Vec::with_capacity(wstart + cid53.len() + new_cid3.len());
+    w.extend_from_slice(&cid53[..wstart]);
+    for r in &wrecs {
+        let data = if r.cid == 3 {
+            &new_cid3
+        } else {
+            &cid53[r.data.clone()]
+        };
+        push_rec(&mut w, r.cid, data);
+    }
+    let mut p = Vec::with_capacity(orig.len() + new_cid3.len());
+    p.extend_from_slice(&version.to_le_bytes());
+    for r in &recs {
+        let data = if r.cid == 53 {
+            &w
+        } else {
+            &orig[r.data.clone()]
+        };
+        push_rec(&mut p, r.cid, data);
+    }
+    Ok(p)
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -715,10 +913,9 @@ mod tests {
             .copy_from_slice(&0.1631f32.to_le_bytes());
         let z0 = zlib_stream(&s0);
         let z1 = zlib_stream(&[0u8; 8192]);
-        let mut v = z0;
+        let mut v = z0.clone();
         v.extend_from_slice(&z1);
-        let z0_len = v.len() - z1.len() - 4;
-        v.extend_from_slice(&(z0_len as u32).to_le_bytes());
+        v.extend_from_slice(&(z0.len() as u32).to_le_bytes());
         v
     }
 
@@ -1260,17 +1457,89 @@ mod tests {
                     crate::testutil::decode_zstd_frame(&golden[gfoff..]),
                     "preset {nn} body differs from the real importer golden"
                 );
-            }
-        }
+    /// Pull the inner cid-3 chunk out of a PluginParams payload (test-local).
+    fn inner_cid3(payload: &[u8]) -> Vec<u8> {
+        let recs = records_of(payload, 4);
+        let w = &recs.iter().find(|r| r.0 == 53).unwrap().1;
+        records_of(w, 4).into_iter().find(|r| r.0 == 3).unwrap().1
     }
 
     #[test]
-    fn convert_fxp_rejects_garbage_and_non_fxp_containers() {
-        assert!(convert_fxp_bytes(b"").is_err());
-        assert!(convert_fxp_bytes(b"not an fxp at all").is_err());
-        // A Serum2 XferJson blob is not a CcnK fxp container.
-        let mut xfer = b"XferJson\0".to_vec();
-        xfer.extend_from_slice(&[0u8; 64]);
-        assert!(convert_fxp_bytes(&xfer).is_err());
+    fn patch_flp_updates_state_and_report() {
+        let buf = sample_flp();
+        let (out, rep) = patch_serum_metadata(
+            &buf,
+            &[
+                fxp::PatchField::Name("Patched Name".into()),
+                fxp::PatchField::Author("Patched Author".into()),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(rep.patched.len(), 1);
+        assert_eq!(rep.patched[0].channel_name, "Serum");
+        assert_eq!(rep.patched[0].old_preset_name, "TestPreset");
+        assert_eq!(rep.patched[0].new_preset_name, "Patched Name");
+        assert!(rep.warnings.is_empty());
+
+        // FLdt length correct, header prefix untouched.
+        assert_eq!(fldt_len(&out), out.len() - 22);
+        assert_eq!(&out[..18], &buf[..18]);
+
+        // Non-plugin events byte-identical.
+        let evs_old = flp::parse_events(&buf).unwrap();
+        let evs_new = flp::parse_events(&out).unwrap();
+        assert_eq!(evs_old.len(), evs_new.len());
+        for (o, n) in evs_old.iter().zip(&evs_new) {
+            if o.id == flp::EV_PLUGIN_PARAMS {
+                continue;
+            }
+            assert_eq!((o.id, &o.data), (n.id, &n.data));
+        }
+
+        // The patched state carries the new metadata.
+        let state = crate::zlibio::inflate(&inner_cid3(evs_new[2].data), 1 << 20)
+            .unwrap()
+            .0;
+        let field = |off: usize, len: usize| {
+            String::from_utf8_lossy(&state[off..off + len])
+                .trim_end_matches('\0')
+                .to_string()
+        };
+        assert_eq!(field(serum::OFF_PRESET_NAME, 32), "Patched Name");
+        assert_eq!(field(serum::OFF_AUTHOR, 48), "Patched Author");
+        assert_eq!(field(serum::OFF_CATEGORY, 48), "");
     }
-}
+
+    #[test]
+    fn patch_flp_keeps_other_records_byte_identical() {
+        let buf = sample_flp();
+        let (out, _) =
+            patch_serum_metadata(&buf, &[fxp::PatchField::Category("Cat".into())]).unwrap();
+        let old = flp::parse_events(&buf).unwrap();
+        let new = flp::parse_events(&out).unwrap();
+        let po = records_of(old[2].data, 4);
+        let pn = records_of(new[2].data, 4);
+        // Same record sequence; only cid 53 differs (its inner cid-3 chunk
+        // was rebuilt).
+        assert_eq!(
+            po.iter().map(|r| r.0).collect::<Vec<_>>(),
+            pn.iter().map(|r| r.0).collect::<Vec<_>>()
+        );
+        for (o, n) in po.iter().zip(&pn) {
+            if o.0 == 53 {
+                // Inside the wrapper, only the inner cid-3 chunk differs.
+                let wo = records_of(&o.1, 4);
+                let wn = records_of(&n.1, 4);
+                assert_eq!(
+                    wo.iter().map(|r| r.0).collect::<Vec<_>>(),
+                    wn.iter().map(|r| r.0).collect::<Vec<_>>()
+                );
+                for (a, b) in wo.iter().zip(&wn) {
+                    if a.0 == 3 {
+                        continue;
+                    }
+                    assert_eq!(a.1, b.1, "wrapper cid {} changed", a.0);
+                }
+            } else {
+                assert_eq!(o.1, n.1, "record cid {} changed", o.0);
