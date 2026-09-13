@@ -74,8 +74,9 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
         ctx.set_f32(s1state::OFF_AUX_PARAMS + 4 * i, d);
     }
 
-    // ---- FX mirror 0x3700 migration (unconditional) ----
-    {
+    // ---- FX mirror 0x3700 migration (importer 0x4DB5EF, version < 0.0599
+    // only; modern blobs already carry quantized values) ----
+    if ver < 0.0599 {
         let mut xs = [0f32; 4];
         for (k, x) in xs.iter_mut().enumerate() {
             *x = ctx.f32_at(0x3700 + 4 * k);
@@ -86,7 +87,104 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
         }
     }
 
-    // ---- defaults push: S2 idx 0x104..0x155 from state+0x4AE0+4i ----
+    // ---- delay-time re-quantization for master params 44/142 (importer
+    // 0x4DD1DE–0x4DD26A, version < 0.155; K = 89 below 0.142, else 88) ----
+    if ver < 0.155 {
+        let k = if ver < 0.142 { 88.0f32 } else { 89.0f32 };
+        for idx in [44usize, 142usize] {
+            let off = s1state::OFF_MASTER_PARAMS + 4 * idx;
+            let v = ctx.f32_at(off);
+            let t = (v * k + 0.5).trunc() / 95.0;
+            ctx.set_f32(off, t);
+        }
+    }
+
+    // ---- switch-region migration (importer 0x4DC094–0x4DD2DD). The 2015-era
+    // global-switch block is rebuilt through a version-dependent chain of
+    // region shifts whose static thread is not fully recoverable; the
+    // effective mappings below were calibrated against the real importer
+    // (see docs/flp-conversion.md "Legacy presets"). Class A covers
+    // 0.147..0.148 (constant defaults), class B 0.148..0.158 moves the
+    // pre-migration aux slots 45..71 up by 43 slots (verified on the linear
+    // observables: global tuning and poly count). ----
+    if (0.147..0.148).contains(&ver) {
+        const CLASS_A: [(usize, f32); 15] = [
+            (40, 0.5), // FXFilter stereo 50
+            (41, 1.0), // FXComp wet 100
+            (43, 0.5), // FXComp thresh 100
+            (44, 0.5),
+            (89, 0.5), // RoutingSlot3 -> Direct
+            (90, 0.5), // global tuning 440 Hz
+            (91, 0.25),
+            (94, 0.5),      // mono on
+            (95, 0.5),      // legato on
+            (96, 0.5),      // portamento always on
+            (98, 0.25),     // oversampling 1x
+            (101, 0.468),   // polyphony 16
+            (104, 0.03125), // unison range
+            (105, 0.03125),
+            (113, 0.5), // FXReverb type kHall
+        ];
+        for (i, v) in CLASS_A {
+            ctx.set_f32(s1state::OFF_AUX_PARAMS + 4 * i, v);
+        }
+    } else if (0.148..0.158).contains(&ver) {
+        let mut moved = [0f32; 28]; // pre slots 44..71
+        for (k, slot) in moved.iter_mut().enumerate() {
+            *slot = ctx.f32_at(s1state::OFF_AUX_PARAMS + 4 * (44 + k));
+        }
+        ctx.set_f32(s1state::OFF_AUX_PARAMS + 4 * 87, moved[0]); // 87 <- 44
+        for i in 88..=114usize {
+            ctx.set_f32(s1state::OFF_AUX_PARAMS + 4 * i, moved[i - 87]);
+        }
+    }
+
+    // ---- per-FX level-out migration + defaults (importer 0x4DD2DD–0x4DD69D).
+    // Below 0.159 the pre-0.148 FX param slots (classic LFO region tails
+    // 0x1B50/0x1B60 and, from 0.148, the blob tail 0x6E28/0x6E38) are copied
+    // into the aux mirror at 0x4B94..0x4BD4; below 0.16 the ten per-FX
+    // level-out slots at 0x4BD4+4i are reset to defaults (0.5); below 0.158
+    // sixteen more aux slots at 0x4BFC+4i are reset (constants live in
+    // runtime-relocated .data, derived empirically against the real
+    // importer's output — see docs/flp-conversion.md). ----
+    if ver < 0.159 {
+        let copy = |ctx: &mut Ctx, src: usize, dst: usize| {
+            let b: [u8; 16] = ctx.st[src..src + 16].try_into().unwrap();
+            ctx.st[dst..dst + 16].copy_from_slice(&b);
+        };
+        copy(&mut ctx, 0x1B60, 0x4B94);
+        if ver >= 0.148 {
+            copy(&mut ctx, 0x6E38, 0x4BA4);
+        }
+        copy(&mut ctx, 0x1B50, 0x4BB4);
+        if ver >= 0.148 {
+            copy(&mut ctx, 0x6E28, 0x4BC4);
+        }
+    }
+    if ver < 0.16 {
+        for k in 0..10usize {
+            ctx.set_f32(0x4BD4 + 4 * k, 0.5);
+        }
+        if ver < 0.158 {
+            // sixteen aux defaults (importer 0x4DD565; the constants live in
+            // runtime-relocated .data — all zero per the real importer's
+            // LFOPointModBus output on legacy presets).
+            for k in 0..16usize {
+                ctx.set_f32(0x4BFC + 4 * k, 0.0);
+            }
+        }
+    }
+
+    // ---- release rescale (state+0x3688: v = (v*999 + 0.1 - 0.1)/999.9) ----
+    {
+        let v = ctx.f32_at(0x3688);
+        let t = ((f64::from(v) * 999.0 + 0.10000000149011612 - 0.10000000149011612)
+            / 999.9000244140625) as f32;
+        ctx.set_f32(0x3688, t);
+    }
+
+    // ---- defaults push: S2 idx 0x104..0x155 from state+0x4AE0+4i
+    // (importer 0x4DD705, after the level-out migration above) ----
     for i in 0x20usize..0x72 {
         let v = f64::from(ctx.f32_at(s1state::OFF_AUX_PARAMS + 4 * i));
         ctx.fn_setval(i + 0xE4, v);
@@ -102,90 +200,100 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
         }
     }
 
-    // ---- LFO blocks 1..8 + 9..10 (curve writer; modern blocks for 0.1631) ----
-    let lfo9_10_alt = (0.148..0.163).contains(&ver);
+    // ---- LFO blocks 1..8 + 9..10 (curve writer; source selected by
+    // version: modern graph blocks at blob+0x84E0 for >= 0.162, classic
+    // regions normalized through fn_4f1eb0 below that, and pure default
+    // blocks for LFO 5-8 below 0.148) ----
     for k in 0..8usize {
-        let src: Vec<u8> = if ver >= 0.148 {
+        let src: Vec<u8> = if ver >= 0.162 {
             preset
                 .lfo_block(k)
                 .map(|b| b.to_vec())
                 .unwrap_or_else(|| vec![0u8; s1state::LFO_BLOCK_SIZE])
-        } else {
-            let classic = match (k, lfo9_10_alt) {
-                (0..=3, _) => preset.classic_lfo_block(k),
-                (4..=7, false) => preset.classic_lfo_block(k),
-                (4..=7, true) => preset
-                    .classic_lfo_5_8_alt()
-                    .or_else(|| preset.classic_lfo_block(k)),
-                _ => None,
-            };
-            match classic {
-                Some(b) => lfo::normalize_classic_lfo(b),
-                None => vec![0u8; s1state::LFO_BLOCK_SIZE],
+        } else if ver >= 0.148 || k < 4 {
+            match preset.classic_lfo_region(k, ver >= 0.148) {
+                Some(r) => lfo::normalize_classic_lfo(r, k & 3),
+                None => lfo::default_classic_block(false),
             }
+        } else {
+            lfo::default_classic_block(false)
         };
         let node = lfo::write_lfo_curve(&ctx, k, &src);
         let key = format!("LFO{k}");
         ctx.root.set(&key, node);
     }
     for k in 0..2usize {
-        let src: Vec<u8> = if ver >= 0.148 {
+        // LFO 9/10 flex blocks: the importer normalizes the classic region
+        // into blob+0x1EE20 (flag=1 prefill) but fn_4f2a70's flag=1 mode
+        // emits nothing into the tree for them — only the phasor defaults
+        // below (importer 0x4DB024, unconditional) are visible.
+        let src: Vec<u8> = if ver >= 0.162 {
             preset
                 .flex_lfo_block(k)
                 .map(|b| b.to_vec())
                 .unwrap_or_else(|| vec![0u8; s1state::LFO_BLOCK_SIZE])
         } else {
-            match preset.classic_lfo_block(4 + k) {
-                Some(b) => lfo::normalize_classic_lfo(b),
-                None => vec![0u8; s1state::LFO_BLOCK_SIZE],
-            }
+            vec![0u8; s1state::LFO_BLOCK_SIZE]
         };
         let node = lfo::write_lfo_flex(&ctx, k, &src);
         let key = format!("LFO{}", 8 + k);
         ctx.root.set(&key, node);
     }
 
-    // ---- WTOsc flex curve blocks (embedded default shapes, blob+0x24870) ----
+    // ---- WTOsc flex curve blocks: the init-body skeleton carries the
+    // default phasor shapes; they are only replaced when the preset embeds
+    // flex data at blob+0x24870 (legacy blobs do not). ----
     for k in 0..2usize {
         let base = 0x24870 + k * s1state::LFO_BLOCK_SIZE;
         let block = match ctx.st.get(base..base + s1state::LFO_BLOCK_SIZE) {
             Some(b) => b.to_vec(),
             None => vec![0u8; s1state::LFO_BLOCK_SIZE],
         };
-        let mut curve = Val::obj();
-        let np = u32::from_le_bytes(block[0x2D08..0x2D0C].try_into().unwrap_or([0; 4])).min(0x1E1);
-        curve.set("numPoints", Val::UInt(u64::from(np)));
-        let mut cv = Val::arr();
-        for i in 0..480usize {
-            cv.push(Val::F64(f64::from_le_bytes(
-                block[i * 8..i * 8 + 8].try_into().unwrap(),
-            )));
+        let empty = block.iter().all(|&b| b == 0);
+        let mut curve = if empty {
+            // empty block: the importer's default single-point phasor shape
+            lfo::default_phasor_curve_legacy()
+        } else {
+            Val::obj()
+        };
+        if !empty {
+            let np =
+                u32::from_le_bytes(block[0x2D08..0x2D0C].try_into().unwrap_or([0; 4])).min(0x1E1);
+            curve.set("numPoints", Val::UInt(u64::from(np)));
         }
-        curve.set("curveVals", cv);
-        let mut x = Val::arr();
-        for i in 0..480usize {
-            x.push(Val::F64(f64::from_le_bytes(
-                block[0xF00 + i * 8..0xF00 + i * 8 + 8].try_into().unwrap(),
-            )));
+        if !empty {
+            let mut cv = Val::arr();
+            for i in 0..480usize {
+                cv.push(Val::F64(f64::from_le_bytes(
+                    block[i * 8..i * 8 + 8].try_into().unwrap(),
+                )));
+            }
+            curve.set("curveVals", cv);
+            let mut x = Val::arr();
+            for i in 0..480usize {
+                x.push(Val::F64(f64::from_le_bytes(
+                    block[0xF00 + i * 8..0xF00 + i * 8 + 8].try_into().unwrap(),
+                )));
+            }
+            curve.set("xVals", x);
+            let mut y = Val::arr();
+            for i in 0..480usize {
+                y.push(Val::F64(f64::from_le_bytes(
+                    block[0x1E00 + i * 8..0x1E00 + i * 8 + 8]
+                        .try_into()
+                        .unwrap(),
+                )));
+            }
+            curve.set("yVals", y);
         }
-        curve.set("xVals", x);
-        let mut y = Val::arr();
-        for i in 0..480usize {
-            y.push(Val::F64(f64::from_le_bytes(
-                block[0x1E00 + i * 8..0x1E00 + i * 8 + 8]
-                    .try_into()
-                    .unwrap(),
-            )));
-        }
-        curve.set("yVals", y);
         ctx.root
             .obj_at(&format!("Oscillator{k}"))
             .obj_at(&format!("WTOsc{k}"))
             .set("flex", curve);
     }
 
-    // ---- LFO 8/9 phasor defaults (version > 0.155) ----
-    lfo::write_phasor_defaults(&mut ctx, ver);
+    // ---- LFO 8/9 phasor defaults (unconditional; importer 0x4DB024) ----
+    lfo::write_phasor_defaults(&mut ctx);
 
     // ---- detuneFactor / oldSerum1Preset ----
     if ver < 0.149 {
@@ -206,8 +314,35 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
     }
 
     // ---- lfophasor writes (version > 0.161): each env with a value writes
-    // `lfophasor` into its family's rack cell; the distortion cell additionally
-    // receives a two-entry `flex` array of default phasor curves ----
+    // `lfophasor` into its family's rack cell; the distortion cell
+    // additionally receives a two-entry `flex` array of default phasor
+    // curves. The flex pair itself is written for every version (importer
+    // 0x4DDD5D block; observed on 0.147-0.153 presets). ----
+    {
+        let cell = ctx.order[0].clamp(0, 9) as usize;
+        let arr = ctx.root.obj_at("FXRack0").arr_at("FX");
+        if let Val::Array(a) = arr {
+            while a.len() <= cell {
+                a.push(Val::obj());
+            }
+            let cellnode = &mut a[cell];
+            cellnode.set("type", Val::UInt(0));
+            cellnode.set("flex", {
+                let mut pair = Val::arr();
+                let (a, b) = if ver > 0.161 {
+                    (lfo::default_phasor_curve(), lfo::default_phasor_curve())
+                } else {
+                    (
+                        lfo::default_phasor_curve_legacy(),
+                        lfo::default_phasor_curve_legacy(),
+                    )
+                };
+                pair.push(a);
+                pair.push(b);
+                pair
+            });
+        }
+    }
     if ver > 0.161 {
         let mut any = false;
         for (env, fam) in ENV_FAM_TABLE.iter().enumerate() {
@@ -282,17 +417,22 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
         ctx.root.obj_at("scalars").set(key, node);
     }
 
-    // ---- release rescale (state+0x3688: v = (v*999 + 0.1 - 0.1)/999.9) ----
-    {
-        let v = ctx.f32_at(0x3688);
-        let t = ((f64::from(v) * 999.0 + 0.10000000149011612 - 0.10000000149011612)
-            / 999.9000244140625) as f32;
-        ctx.set_f32(0x3688, t);
-    }
-
     // ---- MASTER PARAM LOOP (blob+0x3460, 0..247) ----
     for i in 0..248usize {
         let mut v = ctx.f32_at(s1state::OFF_MASTER_PARAMS + 4 * i);
+        // legacy (< 0.162) distortion-mode menu: kDownsample sat at index 10
+        // (after kAsym/kRectify) before the menu was reordered to index 8
+        if ver < 0.162 && i == 99 {
+            let j = (v * 15.0).round();
+            let j = match j as i32 {
+                8 => 9.0,
+                9 => 10.0,
+                10 => 8.0,
+                _ => j,
+            };
+            v = j / 15.0;
+            ctx.set_f32(s1state::OFF_MASTER_PARAMS + 4 * i, v);
+        }
         if (ver < 0.008 && i >= 178) || (ver < 0.009 && i >= 180) {
             ctx.fn_setval(i + 4, f64::from(v));
         }
@@ -315,6 +455,21 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
         }
     }
 
+    // ---- legacy RoutingSlot4 gap note (docs/flp-conversion.md limitation
+    // (a)): for legacy presets the value the real importer applies to the
+    // FX-output routing slot is not recoverable from the blob; where the
+    // conversion resolves the slot to Master the real importer has been
+    // observed to choose Direct instead (FL_FMItUp / FL_BASS_Adventure).
+    // Surface it instead of guessing. ----
+    if ver < 0.162 && ctx.f32_at(s1state::OFF_MASTER_PARAMS + 4 * 43) < 0.25 {
+        ctx.notes.push(
+            "legacy preset: RoutingSlot4 routing destination could not be \
+             recovered (Master assumed; Serum 2's importer chooses Direct for \
+             some legacy files)"
+                .into(),
+        );
+    }
+
     // ---- S1 mod-slot staging + ModSlot node builder ----
     modmatrix::stage_mod_slots(&mut ctx, ver);
 
@@ -324,8 +479,19 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
     // ---- midiMap (version > 0.1299) ----
     meta::write_midi_map(&mut ctx, ver);
 
-    // ---- mixOrGain1..10 (version >= 0.05) ----
+    // ---- mixOrGain1..10 (version >= 0.159, importer 0x4E00FD) ----
     fxrack::write_mix_or_gain(&mut ctx, ver);
+
+    // ---- per-FX gain: S2 idx 0x121+i <- f32 blob+0x4BD4+4i, unconditional
+    // (importer 0x4E0275-0x4E02A3; also mirrors 0x4BF0 -> 0x3BA4 each pass) ----
+    {
+        let mirror = ctx.f32_at(0x4BF0);
+        ctx.set_f32(0x3BA4, mirror);
+        for i in 0..10usize {
+            let v = ctx.f32_at(0x4BD4 + 4 * i);
+            ctx.fn_setval(0x121 + i, f64::from(v));
+        }
+    }
 
     // ---- preset name / author / description + WT / noise names ----
     meta::write_names(&mut ctx);
@@ -425,10 +591,12 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
                 .obj_at(&sec)
                 .set("storedPhasePos", arr);
         }
-        ctx.root
-            .obj_at("Oscillator4")
-            .obj_at("SubOsc4")
-            .set("storedPhasePos", Val::Int(0));
+        if ctx.u64_at(s1state::OFF_STORED_PHASE_POS) == 0 {
+            ctx.root
+                .obj_at("Oscillator4")
+                .obj_at("SubOsc4")
+                .set("storedPhasePos", Val::Int(0));
+        }
     }
 
     // ---- FX dead-cell masking (version > 0.05) ----
@@ -436,10 +604,12 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
 
     // ---- FX cell finalize: type + missing submap keys ----
     fxrack::finalize_fx_cells(&mut ctx);
+    modmatrix::remap_dest_module_ids(&mut ctx);
 
     // ---- ModSlot post-passes ----
     modmatrix::post_pass_1(&mut ctx);
     modmatrix::post_pass_2(&mut ctx);
+    modmatrix::post_pass_3(&mut ctx);
 
     // ---- envelope loop (kParamAmount = residue·100) ----
     modmatrix::env_loop(&mut ctx);
@@ -462,7 +632,7 @@ pub fn convert_s1_to_s2(preset: &S1Preset, flag: u8) -> Result<Converted, String
     }
 
     // ---- meta ----
-    meta::write_meta(&mut ctx);
+    meta::write_meta(&mut ctx, ver);
 
     if flag != 0 {
         // FX-build variant: the WTOsc nodes are not emitted
@@ -532,6 +702,11 @@ impl<'a> Ctx<'a> {
         self.st
             .get(off..off + 4)
             .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
+    }
+    fn u64_at(&self, off: usize) -> u64 {
+        self.st
+            .get(off..off + 8)
+            .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
     }
     fn set_u32(&mut self, off: usize, v: u32) {
         if let Some(slot) = self.st.get_mut(off..off + 4) {

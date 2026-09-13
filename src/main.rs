@@ -18,6 +18,7 @@
 use clap::{Parser, Subcommand};
 use flp_extract_fxp::core::{
     self, default_out_dir, format_bytes, hash_bytes, sanitize_filename, scan_serum_instances,
+    scan_serum2_instances,
 };
 use flp_extract_fxp::flpconv::BundleSource;
 use flp_extract_fxp::report::{
@@ -25,9 +26,20 @@ use flp_extract_fxp::report::{
     ExtractInputReport, ExtractReport, ExtractStatus, ListInputReport, ListReport, PatchReport,
     PresetEntry, ValidateInputReport, ValidateReport,
 };
-use flp_extract_fxp::{flpconv, fxp, serum};
+use flp_extract_fxp::{flpconv, fxp, serum, serum2state};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// The built-in naming template. It must keep reproducing the pre-template
+/// output byte-exactly - including how duplicate preset names were
+/// disambiguated (see [`next_output_file_name`]).
+const DEFAULT_NAME_TEMPLATE: &str = "{index}_{preset}";
+
+/// Fallback label for report messages (`-` when empty).
+fn display_name(name: &str) -> &str {
+    if name.is_empty() { "-" } else { name }
+}
 
 #[derive(Parser)]
 #[command(
@@ -64,6 +76,20 @@ enum Command {
         /// Keep extracting even when a preset fails Serum2 validation.
         #[arg(long)]
         keep_invalid: bool,
+        /// Output file name template. Placeholders: {index} {preset}
+        /// {channel} {author} {category}; unknown ones resolve to empty and
+        /// each substituted value is sanitized separately. Literal template
+        /// text is used verbatim, so '/', '\' and '..' written there can
+        /// create subdirectories or escape the --out directory.
+        /// Example: --name-template "{preset}_{author}"
+        #[arg(long, default_value = DEFAULT_NAME_TEMPLATE)]
+        name_template: String,
+        /// Write presets whose content hash duplicates an earlier one anyway.
+        #[arg(long)]
+        keep_duplicates: bool,
+        /// Also extract Serum2 instances as .SerumPreset preset files.
+        #[arg(long)]
+        serum2: bool,
         /// Print a machine-readable JSON report on stdout (progress goes
         /// to stderr).
         #[arg(long)]
@@ -392,25 +418,155 @@ fn match_component(pat: &str, name: &str) -> bool {
     p[pi..].iter().all(|c| *c == '*')
 }
 
+/// Sanitize one substituted template value. Unlike [`sanitize_filename`],
+/// an empty value stays empty so that all-empty renders can be detected and
+/// routed through the fallback chain.
+fn sanitize_template_value(value: &str) -> String {
+    if value.is_empty() {
+        String::new()
+    } else {
+        sanitize_filename(value)
+    }
+}
+
+/// The current base-name fallback chain: preset name -> channel name ->
+/// `Serum N` (unsanitized). It backs the `{preset}` placeholder - so the
+/// default template `{index}_{preset}` reproduces today's names exactly -
+/// and the fallback for templates that render to an empty name.
+fn naming_fallback<'a>(index: usize, preset: &'a str, channel: &'a str) -> Cow<'a, str> {
+    if !preset.is_empty() {
+        Cow::Borrowed(preset)
+    } else if !channel.is_empty() {
+        Cow::Borrowed(channel)
+    } else {
+        Cow::Owned(format!("Serum {index}"))
+    }
+}
+
+/// Render an output file name template for one instance.
+///
+/// Placeholders: `{index}` (1-based, zero-padded to two digits), `{preset}`
+/// (follows the preset -> channel -> `Serum N` fallback chain), `{channel}`,
+/// `{author}`, `{category}`. Unknown placeholders resolve to empty, as do
+/// empty values, and every substituted value is sanitized on its own - never
+/// the template as a whole, so hostile preset metadata cannot inject path
+/// separators. Template literals are kept verbatim (the user's own input).
+/// A render that ends up empty falls back to the existing naming chain.
+fn render_name_template(
+    template: &str,
+    index: usize,
+    preset: &str,
+    channel: &str,
+    author: &str,
+    category: &str,
+) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) => {
+                let value = match &after[..close] {
+                    "index" => format!("{index:02}"),
+                    "preset" => naming_fallback(index, preset, channel).into_owned(),
+                    "channel" => channel.to_string(),
+                    "author" => author.to_string(),
+                    "category" => category.to_string(),
+                    _ => String::new(),
+                };
+                out.push_str(&sanitize_template_value(&value));
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push_str(&rest[open..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    if out.is_empty() {
+        sanitize_filename(&naming_fallback(index, preset, channel))
+    } else {
+        out
+    }
+}
+
+/// The base name for one instance under `name_template`.
+///
+/// For [`DEFAULT_NAME_TEMPLATE`] this is the index-free legacy base
+/// (sanitized fallback chain): the `{index}` prefix and the duplicate suffix
+/// are added by [`next_output_file_name`], keyed on this base, so the default
+/// output stays byte-exact with the pre-template naming. Any other template
+/// renders to the full name, which is also the dedup key.
+fn template_base(
+    name_template: &str,
+    index: usize,
+    preset: &str,
+    channel: &str,
+    author: &str,
+    category: &str,
+) -> String {
+    if name_template == DEFAULT_NAME_TEMPLATE {
+        sanitize_filename(&naming_fallback(index, preset, channel))
+    } else {
+        render_name_template(name_template, index, preset, channel, author, category)
+    }
+}
+
+/// Consume one dedup slot for `base` and build the output file name.
+///
+/// Under the default template the suffix is inserted between the index
+/// prefix and the base name (`01_Lead.fxp`, then `02_Lead_2.fxp`) - exactly
+/// the pre-template layout, because dedup keys on the index-free base.
+/// Custom templates key dedup on the whole rendered name and append the
+/// suffix at the end (`Lead.fxp`, then `Lead_2.fxp`).
+fn next_output_file_name(
+    used_names: &mut HashMap<String, usize>,
+    base: &str,
+    index: usize,
+    is_default_template: bool,
+) -> String {
+    let count = used_names.entry(base.to_string()).or_insert(0);
+    *count += 1;
+    if is_default_template {
+        if *count == 1 {
+            format!("{index:02}_{base}.fxp")
+        } else {
+            format!("{index:02}_{base}_{count}.fxp")
+        }
+    } else if *count == 1 {
+        format!("{base}.fxp")
+    } else {
+        format!("{base}_{count}.fxp")
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_extract(
     inputs: &[PathBuf],
     out_dir_opt: Option<&PathBuf>,
     overwrite: bool,
     keep_invalid: bool,
+    name_template: &str,
+    keep_duplicates: bool,
+    serum2: bool,
     out: &Out,
 ) -> Result<ExtractReport, String> {
     let mut input_reports: Vec<ExtractInputReport> = Vec::new();
     let mut total_extracted = 0usize;
     let mut total_invalid = 0usize;
+    // content hash -> first occurrence (file, 1-based preset index), shared
+    // across the whole batch so duplicates are detected across input files.
+    let mut seen: HashMap<u64, (String, usize)> = HashMap::new();
     for input in inputs {
         let docs = read_input_docs(input)?;
         let out_dir = match out_dir_opt {
             Some(o) => o.clone(),
             None => default_out_dir(input),
         };
-        // Dedupe and unique-naming span the whole input (all members of a
-        // zipped loop package).
-        let mut seen: HashSet<u64> = HashSet::new();
+        // Unique naming spans the whole input (all members of a zipped loop
+        // package); dedupe spans the whole batch (see `seen` above).
         let mut used_names: HashMap<String, usize> = HashMap::new();
         for doc in &docs {
             let (instances, stats) = match scan_serum_instances(&doc.data) {
@@ -426,7 +582,34 @@ fn run_extract(
             for msg in &stats.failed {
                 print_warning(doc, msg);
             }
-            if instances.is_empty() {
+            // Serum2 instances: only scanned (and extracted) with --serum2.
+            let s2_instances = if serum2 {
+                let (insts, warnings) = match scan_serum2_instances(&doc.data) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if doc.from_archive {
+                            eprintln!("warning: skipping {}: {e}", doc.name);
+                            (Vec::new(), Vec::new())
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
+                for msg in &warnings {
+                    print_warning(doc, msg);
+                }
+                insts
+            } else {
+                Vec::new()
+            };
+            // When --serum2 is active, instances that failed to produce a
+            // .SerumPreset are counted here instead of the raw scan count.
+            let mut serum2_skipped = if serum2 {
+                0u32
+            } else {
+                stats.serum2_count as u32
+            };
+            if instances.is_empty() && s2_instances.is_empty() {
                 eprintln!(
                     "{}: no Serum presets found ({} Serum2 instance(s) skipped)",
                     doc.name, stats.serum2_count
@@ -437,21 +620,26 @@ fn run_extract(
                     entries: Vec::new(),
                     extracted_count: 0,
                     failed: stats.failed,
-                    serum2_skipped: stats.serum2_count as u32,
+                    serum2_skipped,
                 });
                 continue;
             }
             std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
-            out.line(&format!(
-                "{}: {} Serum preset(s){}",
-                doc.name,
-                instances.len(),
-                if stats.serum2_count > 0 {
-                    format!(", {} Serum2 instance(s) skipped", stats.serum2_count)
-                } else {
-                    String::new()
-                }
-            ));
+            if !serum2 && stats.serum2_count > 0 {
+                out.line(&format!(
+                    "{}: {} Serum preset(s), {} Serum2 instance(s) skipped",
+                    doc.name,
+                    instances.len(),
+                    stats.serum2_count
+                ));
+            } else {
+                out.line(&format!(
+                    "{}: {} Serum preset(s), {} Serum2 preset(s)",
+                    doc.name,
+                    instances.len(),
+                    s2_instances.len()
+                ));
+            }
             let mut entries: Vec<ExtractEntry> = Vec::with_capacity(instances.len());
             let mut extracted_count = 0u32;
             for (i, inst) in instances.iter().enumerate() {
@@ -459,14 +647,14 @@ fn run_extract(
                 let report = fxp::validate_chunk_report(&inst.chunk.chunk);
                 let warnings: Vec<String> = report.warnings().map(str::to_string).collect();
                 let errors: Vec<String> = report.fatals().map(str::to_string).collect();
-                let base_name: String = if !inst.chunk.meta.preset_name.is_empty() {
-                    inst.chunk.meta.preset_name.clone()
-                } else if !inst.channel_name.is_empty() {
-                    inst.channel_name.clone()
-                } else {
-                    format!("Serum {}", i + 1)
-                };
-                let base = sanitize_filename(&base_name);
+                let base = template_base(
+                    name_template,
+                    i + 1,
+                    &inst.chunk.meta.preset_name,
+                    &inst.channel_name,
+                    &inst.chunk.meta.author,
+                    &inst.chunk.meta.category,
+                );
                 let mut push_entry = |status: ExtractStatus, path: Option<String>| {
                     entries.push(ExtractEntry {
                         index: i as u32,
@@ -487,24 +675,27 @@ fn run_extract(
                     })
                 };
 
-                if !seen.insert(key) {
+                if let Some((first_file, first_idx)) = seen.get(&key) {
                     out.line(&format!(
-                        "  [{:02}] duplicate of an earlier preset, skipped (channel '{}')",
+                        "  [{:02}] duplicate of {first_file}:{first_idx:02}, skipped (channel '{}')",
                         i + 1,
                         inst.channel_name
                     ));
-                    push_entry(ExtractStatus::Duplicate, None);
-                    continue;
+                    if !keep_duplicates {
+                        push_entry(ExtractStatus::Duplicate, None);
+                        continue;
+                    }
+                } else {
+                    seen.insert(key, (doc.name.clone(), i + 1));
                 }
 
                 let file = fxp::build_fxp(&inst.chunk.chunk, &inst.chunk.meta.preset_name);
-                let count = used_names.entry(base.clone()).or_insert(0);
-                *count += 1;
-                let file_name = if *count == 1 {
-                    format!("{:02}_{}.fxp", i + 1, base)
-                } else {
-                    format!("{:02}_{}_{}.fxp", i + 1, base, count)
-                };
+                let file_name = next_output_file_name(
+                    &mut used_names,
+                    &base,
+                    i + 1,
+                    name_template == DEFAULT_NAME_TEMPLATE,
+                );
                 let path = out_dir.join(&file_name);
                 if path.exists() && !overwrite {
                     eprintln!(
@@ -571,13 +762,94 @@ fn run_extract(
                 }
                 push_entry(ExtractStatus::Written, Some(path.display().to_string()));
             }
+
+            // --serum2: write one .SerumPreset per Serum2 instance.
+            let mut used_s2: HashMap<String, usize> = HashMap::new();
+            for (j, s2) in s2_instances.iter().enumerate() {
+                let i = instances.len() + j;
+                let file_bytes =
+                    match serum2state::preset_file_from_processor(&s2.processor, s2.meta.clone()) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            out.line(&format!(
+                                "  [S2 {:02}] skipped a Serum2 instance (channel '{}'): {e}",
+                                j + 1,
+                                if s2.channel_name.is_empty() {
+                                    "-"
+                                } else {
+                                    &s2.channel_name
+                                }
+                            ));
+                            serum2_skipped += 1;
+                            continue;
+                        }
+                    };
+                let base_name = if !s2.meta.preset_name.is_empty() {
+                    s2.meta.preset_name.clone()
+                } else {
+                    format!("Instance {}", j + 1)
+                };
+                let base = sanitize_filename(&base_name);
+                let count = used_s2.entry(base.clone()).or_insert(0);
+                *count += 1;
+                let file_name = if *count == 1 {
+                    format!("{:02}_{base}.SerumPreset", i + 1)
+                } else {
+                    format!("{:02}_{base}_{count}.SerumPreset", i + 1)
+                };
+                let path = out_dir.join(&file_name);
+                let (status, written_path) = if path.exists() && !overwrite {
+                    out.line(&format!(
+                        "  [S2 {:02}] {} exists, skipped (use --overwrite)",
+                        j + 1,
+                        path.display()
+                    ));
+                    (ExtractStatus::Exists, None)
+                } else {
+                    std::fs::write(&path, &file_bytes)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                    total_extracted += 1;
+                    extracted_count += 1;
+                    out.line(&format!(
+                        "  [S2 {:02}] channel '{}' -> preset '{}' by '{}' ({} B) => {}",
+                        j + 1,
+                        if s2.channel_name.is_empty() {
+                            "-"
+                        } else {
+                            &s2.channel_name
+                        },
+                        display_name(&s2.meta.preset_name),
+                        display_name(&s2.meta.preset_author),
+                        file_bytes.len(),
+                        path.display()
+                    ));
+                    (ExtractStatus::Written, Some(path.display().to_string()))
+                };
+                entries.push(ExtractEntry {
+                    index: i as u32,
+                    channel: s2.channel,
+                    channel_name: s2.channel_name.clone(),
+                    preset_name: s2.meta.preset_name.clone(),
+                    author: s2.meta.preset_author.clone(),
+                    category: String::new(),
+                    version_f32: 0.0,
+                    state_bytes: file_bytes.len(),
+                    chunk_bytes: s2.processor.len(),
+                    source: "Serum2".to_string(),
+                    status,
+                    path: written_path,
+                    valid: true,
+                    warnings: Vec::new(),
+                    errors: Vec::new(),
+                });
+            }
             input_reports.push(ExtractInputReport {
                 input: doc.name.clone(),
                 out_dir: out_dir.display().to_string(),
                 extracted_count,
                 entries,
                 failed: stats.failed,
-                serum2_skipped: stats.serum2_count as u32,
+                serum2_skipped,
             });
         }
     }
@@ -1300,9 +1572,23 @@ fn main() {
             out: out_dir,
             overwrite,
             keep_invalid,
+            name_template,
+            keep_duplicates,
+            serum2,
             ..
         } => resolve_inputs(inputs.to_vec())
-            .and_then(|i| run_extract(&i, out_dir.as_ref(), *overwrite, *keep_invalid, &out))
+            .and_then(|i| {
+                run_extract(
+                    &i,
+                    out_dir.as_ref(),
+                    *overwrite,
+                    *keep_invalid,
+                    name_template,
+                    *keep_duplicates,
+                    *serum2,
+                    &out,
+                )
+            })
             .map(AnyReport::Extract),
         Command::Validate { inputs, .. } => run_validate(inputs, &out).map(AnyReport::Validate),
         Command::Convert {
@@ -1512,5 +1798,125 @@ mod tests {
             build(&format!("a{sep}{sep}b{sep}*.flp")),
             PathBuf::from(format!("a{sep}b"))
         );
+    }
+
+    #[test]
+    fn default_template_reproduces_current_naming() {
+        assert_eq!(
+            render_name_template("{index}_{preset}", 3, "Lead", "Ch", "A", "C"),
+            "03_Lead"
+        );
+        // {preset} carries the existing fallback chain, so unnamed presets
+        // keep today's channel / "Serum N" names under the default template.
+        assert_eq!(
+            render_name_template("{index}_{preset}", 2, "", "Chan", "", ""),
+            "02_Chan"
+        );
+        assert_eq!(
+            render_name_template("{index}_{preset}", 4, "", "", "", ""),
+            "04_Serum 4"
+        );
+    }
+
+    #[test]
+    fn template_placeholders_and_unknowns() {
+        assert_eq!(
+            render_name_template("{preset}_{author}", 1, "Lead", "Ch", "X", "C"),
+            "Lead_X"
+        );
+        assert_eq!(
+            render_name_template("{channel}_{category}", 1, "P", "Bass", "A", "Cat"),
+            "Bass_Cat"
+        );
+        // Unknown placeholders resolve to empty; a render that is left
+        // entirely empty falls back to the naming chain (see the test
+        // below), so only non-empty renders show the raw substitution.
+        assert_eq!(render_name_template("{bogus}", 1, "P", "Ch", "A", "C"), "P");
+        assert_eq!(
+            render_name_template("x{nope}y", 1, "P", "Ch", "A", "C"),
+            "xy"
+        );
+        // An unclosed brace is kept as literal text.
+        assert_eq!(
+            render_name_template("weird{x", 1, "P", "", "", ""),
+            "weird{x"
+        );
+    }
+
+    #[test]
+    fn template_values_are_sanitized_individually() {
+        // Hostile metadata cannot inject path separators...
+        assert_eq!(
+            render_name_template("{preset}", 1, "../../etc/passwd", "Ch", "", ""),
+            "_.._etc_passwd"
+        );
+        assert_eq!(
+            render_name_template("{author}", 1, "P", "Ch", "a/b\\c:d", ""),
+            "a_b_c_d"
+        );
+        // ...while template literals are the caller's own responsibility.
+        assert_eq!(
+            render_name_template("a/b_{preset}", 1, "P", "", "", ""),
+            "a/b_P"
+        );
+    }
+
+    #[test]
+    fn default_template_duplicates_match_legacy_names() {
+        // Regression: under the default template dedup must key on the
+        // index-free base, so two presets named "Lead" come out as
+        // 01_Lead.fxp / 02_Lead_2.fxp (suffix between index and base),
+        // byte-exact with the pre-template naming - not 01_Lead.fxp /
+        // 02_Lead.fxp, which is what keying on the templated name produced.
+        let mut used_names: HashMap<String, usize> = HashMap::new();
+        let mut names = Vec::new();
+        for i in 0..3 {
+            let index = i + 1;
+            let preset = if i == 2 { "Bass" } else { "Lead" };
+            let base = template_base(DEFAULT_NAME_TEMPLATE, index, preset, "Ch", "", "");
+            names.push(next_output_file_name(&mut used_names, &base, index, true));
+        }
+        assert_eq!(names, ["01_Lead.fxp", "02_Lead_2.fxp", "03_Bass.fxp"]);
+    }
+
+    #[test]
+    fn custom_template_duplicates_get_suffix() {
+        // Custom templates dedup on the whole rendered name; identical
+        // renders get a _N suffix appended at the end.
+        let mut used_names: HashMap<String, usize> = HashMap::new();
+        let mut names = Vec::new();
+        for i in 0..2 {
+            let index = i + 1;
+            let base = template_base("{preset}", index, "Lead", "", "A", "C");
+            names.push(next_output_file_name(&mut used_names, &base, index, false));
+        }
+        assert_eq!(names, ["Lead.fxp", "Lead_2.fxp"]);
+        // Distinct renders never collide, even when they differ only in the
+        // index...
+        assert_eq!(
+            template_base("{preset}_{index}", 1, "Lead", "", "", ""),
+            "Lead_01"
+        );
+        assert_eq!(
+            template_base("{preset}_{index}", 2, "Lead", "", "", ""),
+            "Lead_02"
+        );
+        // ...and the default template's base is the index-free legacy base.
+        assert_eq!(
+            template_base(DEFAULT_NAME_TEMPLATE, 7, "Lead", "Ch", "", ""),
+            "Lead"
+        );
+    }
+
+    #[test]
+    fn empty_template_render_falls_back() {
+        // Empty values stay empty (not "Untitled"), so an all-empty render
+        // is detected and routed through the fallback chain.
+        assert_eq!(render_name_template("{author}", 1, "P", "Ch", "", ""), "P");
+        assert_eq!(
+            render_name_template("{unknown}", 5, "", "", "", ""),
+            "Serum 5"
+        );
+        assert_eq!(render_name_template("", 7, "", "Chan", "", ""), "Chan");
     }
 }

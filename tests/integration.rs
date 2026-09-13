@@ -8,10 +8,17 @@
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use flp_extract_fxp::{core::scan_serum_instances, flpconv::scan_convertible_detailed};
+use flp_extract_fxp::core::scan_serum_instances;
+use flp_extract_fxp::flp;
+use flp_extract_fxp::flpconv::{
+    BundleSource, InstancePlan, RealSource, filter_plans_by_rows, scan_convertible_detailed,
+};
+use flp_extract_fxp::{s2tree, serum2state};
+use md5::{Digest, Md5};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_flp-extract-fxp");
@@ -23,23 +30,31 @@ fn zlib_stream(data: &[u8]) -> Vec<u8> {
 }
 
 /// A synthetic Serum chunk: zlib(preset state) + zlib(table data) + trailer.
-fn synthetic_serum1_chunk() -> Vec<u8> {
+/// `table_filler` varies the embedded table data (but not the preset state),
+/// producing a distinct chunk hash while keeping the same preset name -
+/// i.e. a duplicate-name case that survives the duplicate-chunk skip.
+fn synthetic_serum1_chunk_with(table_filler: u8) -> Vec<u8> {
     let mut s0 = vec![0u8; 172_736];
     let name = b"SynthTest";
     s0[0x4972..0x4972 + name.len()].copy_from_slice(name);
     s0[0x4994..0x4998].copy_from_slice(&0.1631f32.to_le_bytes());
     let z0 = zlib_stream(&s0);
-    let z1 = zlib_stream(&vec![0u8; 8192]);
+    let z1 = zlib_stream(&vec![table_filler; 8192]);
     let mut chunk = z0.clone();
     chunk.extend_from_slice(&z1);
     chunk.extend_from_slice(&(z0.len() as u32).to_le_bytes());
     chunk
 }
 
+/// The plain zero-filled variant used by main's synthetic helpers.
+fn synthetic_serum1_chunk() -> Vec<u8> {
+    synthetic_serum1_chunk_with(0)
+}
+
 /// FL Studio's VST3 wrapper state: prologue + cid1(64B) + cid3(plugin state)
 /// + cid4(8B).
-fn synthetic_vst3_wrapper_state() -> Vec<u8> {
-    let cid3 = synthetic_serum1_chunk();
+fn synthetic_vst3_wrapper_state_with(table_filler: u8) -> Vec<u8> {
+    let cid3 = synthetic_serum1_chunk_with(table_filler);
     let mut state = Vec::new();
     state.extend_from_slice(&[1, 0, 0, 0]);
     for (cid, payload) in [(1u32, vec![0u8; 64]), (3u32, cid3), (4u32, vec![0u8; 8])] {
@@ -50,16 +65,47 @@ fn synthetic_vst3_wrapper_state() -> Vec<u8> {
     state
 }
 
-/// PluginParams (event 213) payload: version + chunk id/size records.
+/// The plain zero-filled variant used by main's synthetic tests.
+fn synthetic_vst3_wrapper_state() -> Vec<u8> {
+    synthetic_vst3_wrapper_state_with(0)
+}
+
+/// PluginParams (event 213) payload: version + chunk id/size records,
+/// including every cid `apply` needs to rebuild a Serum2 wrapper.
 fn synthetic_plugin_params() -> Vec<u8> {
-    let state = synthetic_vst3_wrapper_state();
+    synthetic_plugin_params_with(0)
+}
+
+fn synthetic_plugin_params_with(table_filler: u8) -> Vec<u8> {
+    let state = synthetic_vst3_wrapper_state_with(table_filler);
+    let cid1: [u8; 20] = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x0C, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let cid2: [u8; 25] = [
+        0, 0xA0, 0, 0, 0, 0x19, 0, 0, 0, 0x8D, 0x7D, 0x20, 0xA4, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let serum_uid: [u8; 16] = [
+        0x58, 0x54, 0x53, 0x56, 0x73, 0x66, 0x73, 0x58, 0x65, 0x72, 0x75, 0x6D, 0, 0, 0, 0,
+    ];
     let mut data = Vec::new();
     data.extend_from_slice(&12u32.to_le_bytes());
-    for (cid, payload) in [
-        (54u32, b"Serum".to_vec()),
-        (55u32, b"Serum.vst3".to_vec()),
-        (53u32, state),
-    ] {
+    let records: Vec<(u32, Vec<u8>)> = vec![
+        (1, cid1.to_vec()),
+        (2, cid2.to_vec()),
+        (30, vec![0; 16]),
+        (32, vec![0; 12]),
+        (50, {
+            let mut v = vec![0x08u8, 0, 0, 0];
+            v.extend_from_slice(&[0; 12]);
+            v
+        }),
+        (52, serum_uid.to_vec()),
+        (54, b"Serum".to_vec()),
+        (55, b"Serum.vst3".to_vec()),
+        (56, b"Xfer Records".to_vec()),
+        (53, state),
+    ];
+    for (cid, payload) in records {
         data.extend_from_slice(&cid.to_le_bytes());
         data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
@@ -83,14 +129,27 @@ fn flp_varint(mut len: usize) -> Vec<u8> {
     out
 }
 
-/// Minimal FLP: FLhd + FLdt containing NewChan + channel name + PluginParams.
-fn synthetic_flp() -> Vec<u8> {
-    let events: Vec<(u8, Vec<u8>)> = vec![
-        (64, vec![0, 0]),        // NewChan: channel 0
-        (203, b"Bass".to_vec()), // channel name
-        (213, synthetic_plugin_params()),
-    ];
+/// Minimal FLP: FLhd + FLdt containing the given `(id, data)` events.
+fn encode_flp(events: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    let mut dt = Vec::new();
+    for (id, data) in events {
+        dt.push(*id);
+        if *id >= 192 {
+            dt.extend_from_slice(&flp_varint(data.len()));
+        }
+        dt.extend_from_slice(data);
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"FLhd");
+    out.extend_from_slice(&6u32.to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0x46, 0, 0x60, 0]);
+    out.extend_from_slice(b"FLdt");
+    out.extend_from_slice(&(dt.len() as u32).to_le_bytes());
+    out.extend_from_slice(&dt);
+    out
+}
 
+fn flp_from_events(events: Vec<(u8, Vec<u8>)>) -> Vec<u8> {
     let mut dt = Vec::new();
     for (id, data) in events {
         dt.push(id);
@@ -107,6 +166,33 @@ fn synthetic_flp() -> Vec<u8> {
     out.extend_from_slice(&(dt.len() as u32).to_le_bytes());
     out.extend_from_slice(&dt);
     out
+}
+
+/// Minimal FLP: FLhd + FLdt containing NewChan + channel name + PluginParams.
+fn synthetic_flp() -> Vec<u8> {
+    synthetic_flp_channel("Bass")
+}
+
+fn synthetic_flp_channel(channel: &str) -> Vec<u8> {
+    flp_from_events(vec![
+        (64, vec![0, 0]),                   // NewChan: channel 0
+        (203, channel.as_bytes().to_vec()), // channel name
+        (213, synthetic_plugin_params()),
+    ])
+}
+
+/// Two channels ("Bass", "Lead"), each holding a Serum instance with the
+/// same preset name "SynthTest" but distinct chunk content, so both survive
+/// the duplicate-chunk skip and reach naming as duplicate preset names.
+fn synthetic_flp_duplicate_preset_names() -> Vec<u8> {
+    flp_from_events(vec![
+        (64, vec![0, 0]),        // NewChan: channel 0
+        (203, b"Bass".to_vec()), // channel name
+        (213, synthetic_plugin_params_with(0)),
+        (64, vec![1, 0]),        // NewChan: channel 1
+        (203, b"Lead".to_vec()), // channel name
+        (213, synthetic_plugin_params_with(1)),
+    ])
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
@@ -146,6 +232,77 @@ fn extract_from_synthetic_flp_then_validate() {
 }
 
 #[test]
+fn extract_honors_name_template() {
+    let dir = temp_dir("template");
+    let flp_path = dir.join("test_project.flp");
+    std::fs::write(&flp_path, synthetic_flp()).unwrap();
+
+    let out_dir = dir.join("out");
+    let status = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_dir)
+        .args(["--name-template", "{channel}_{index}"])
+        .arg(&flp_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "extract failed");
+
+    // Synthetic FLP: channel "Bass", preset "SynthTest" -> template wins.
+    let fxp_path = out_dir.join("Bass_01.fxp");
+    assert!(fxp_path.exists(), "expected {}", fxp_path.display());
+    assert!(!out_dir.join("01_SynthTest.fxp").exists());
+}
+
+#[test]
+fn extract_default_template_duplicates_match_legacy_names() {
+    let dir = temp_dir("dup_default");
+    let flp_path = dir.join("test_project.flp");
+    std::fs::write(&flp_path, synthetic_flp_duplicate_preset_names()).unwrap();
+
+    let out_dir = dir.join("out");
+    let status = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_dir)
+        .arg(&flp_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "extract failed");
+
+    // Pre-template behavior: dedup keys on the index-free preset name, so
+    // the second "SynthTest" gets its suffix between the index and the base.
+    let first = out_dir.join("01_SynthTest.fxp");
+    let second = out_dir.join("02_SynthTest_2.fxp");
+    assert!(first.exists(), "expected {}", first.display());
+    assert!(second.exists(), "expected {}", second.display());
+    // The regression (dedup keyed on the templated name) produced a bare
+    // 02_SynthTest.fxp instead.
+    assert!(!out_dir.join("02_SynthTest.fxp").exists());
+}
+
+#[test]
+fn extract_custom_template_duplicates_get_suffix() {
+    let dir = temp_dir("dup_custom");
+    let flp_path = dir.join("test_project.flp");
+    std::fs::write(&flp_path, synthetic_flp_duplicate_preset_names()).unwrap();
+
+    let out_dir = dir.join("out");
+    let status = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_dir)
+        .args(["--name-template", "{preset}"])
+        .arg(&flp_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "extract failed");
+
+    // Custom templates dedup on the whole rendered name.
+    let first = out_dir.join("SynthTest.fxp");
+    let second = out_dir.join("SynthTest_2.fxp");
+    assert!(first.exists(), "expected {}", first.display());
+    assert!(second.exists(), "expected {}", second.display());
+}
+
+#[test]
 fn validates_real_fixture() {
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/extracted_serum1.fxp");
@@ -159,6 +316,62 @@ fn validates_real_fixture() {
         .status()
         .unwrap();
     assert!(status.success(), "fixture failed validation");
+}
+
+#[test]
+fn extract_skips_cross_file_duplicates() {
+    let dir = temp_dir("dup");
+    let a = dir.join("a_project.flp");
+    let b = dir.join("b_project.flp");
+    std::fs::write(&a, synthetic_flp_channel("Bass")).unwrap();
+    std::fs::write(&b, synthetic_flp_channel("Lead")).unwrap();
+
+    let out_dir = dir.join("out");
+    let output = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_dir)
+        .arg(&a)
+        .arg(&b)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "extract failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = format!("duplicate of {}:{:02}", a.display(), 1);
+    assert!(stdout.contains(&expected), "{stdout}");
+
+    let written = std::fs::read_dir(&out_dir).unwrap().count();
+    assert_eq!(written, 1, "duplicate must not be written");
+}
+
+#[test]
+fn extract_keep_duplicates_writes_both() {
+    let dir = temp_dir("keepdup");
+    let a = dir.join("a_project.flp");
+    let b = dir.join("b_project.flp");
+    std::fs::write(&a, synthetic_flp_channel("Bass")).unwrap();
+    std::fs::write(&b, synthetic_flp_channel("Lead")).unwrap();
+
+    let output = Command::new(BIN)
+        .args(["extract", "--keep-duplicates"])
+        .arg(&a)
+        .arg(&b)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "extract failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let a_fxp = dir.join("a_project_serum_fxp/01_SynthTest.fxp");
+    let b_fxp = dir.join("b_project_serum_fxp/01_SynthTest.fxp");
+    assert!(a_fxp.exists(), "expected {}", a_fxp.display());
+    assert!(b_fxp.exists(), "expected {}", b_fxp.display());
 }
 
 fn serina1_fixture() -> PathBuf {
@@ -1028,7 +1241,7 @@ fn zipped_loop_package_dedupes_across_members() {
     assert!(output.status.success(), "extract failed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("duplicate of an earlier preset"),
+        stdout.contains("duplicate of ") && stdout.contains(":01, skipped"),
         "{stdout}"
     );
     // Only one .fxp is written for the identical pair.
@@ -1317,4 +1530,279 @@ fn convert_resolves_before_single_input_check() {
         stderr.contains("--out can only be used with a single input file"),
         "{stderr}"
     );
+}
+
+/// Apply the same plan-narrowing pipeline the wasm `convert_flp_selected`
+/// uses: rows -> `filter_plans_by_rows` -> bundles -> `apply`.
+fn convert_selected(
+    orig: &[u8],
+    rows: &[u32],
+) -> (Vec<u8>, flp_extract_fxp::flpconv::FlpConversionReport) {
+    let (plans, _) = scan_convertible_detailed(orig).unwrap();
+    let (positions, _) = filter_plans_by_rows(&plans, rows);
+    let kept: Vec<InstancePlan> = positions.iter().map(|&i| plans[i].clone()).collect();
+    let mut source = RealSource::embedded();
+    let bundles: Vec<Option<flp_extract_fxp::flpconv::Serum2Bundle>> = kept
+        .iter()
+        .map(|p| source.bundle_for(p, &[]).unwrap())
+        .collect();
+    flp_extract_fxp::flpconv::apply(orig, &kept, &bundles).unwrap()
+}
+
+#[test]
+fn subset_convert_leaves_unselected_byte_identical() {
+    // Two synthetic Serum instances on separate channels; convert only the
+    // second one (row 1). Runs without any fixture.
+    let params = synthetic_plugin_params();
+    let orig = encode_flp(&[
+        (64, vec![0, 0]),
+        (203, b"Bass".to_vec()),
+        (213, params.clone()),
+        (64, vec![1, 0]),
+        (203, b"Lead".to_vec()),
+        (213, params),
+    ]);
+    let (plans, _) = scan_convertible_detailed(&orig).unwrap();
+    assert_eq!(plans.len(), 2);
+    assert_eq!(plans[0].instance_index, Some(0));
+    assert_eq!(plans[1].instance_index, Some(1));
+
+    let (out, report) = convert_selected(&orig, &[1]);
+    assert_eq!(report.converted.len(), 1);
+    assert_eq!(report.converted[0].channel_name, "Lead");
+
+    let orig_events = flp::parse_events(&orig).unwrap();
+    let out_events = flp::parse_events(&out).unwrap();
+    assert_eq!(orig_events.len(), out_events.len());
+    for (i, (a, b)) in orig_events.iter().zip(&out_events).enumerate() {
+        if i == 5 {
+            assert_ne!(a.data, b.data, "the selected instance must be rewritten");
+        } else {
+            assert_eq!(a.data, b.data, "event {i} must stay byte-identical");
+        }
+    }
+}
+
+#[test]
+fn subset_convert_real_fixture_leaves_unselected_identical() {
+    if !have_serina1() {
+        return;
+    }
+    let orig = std::fs::read(serina1_fixture()).unwrap();
+    let (plans, _) = scan_convertible_detailed(&orig).unwrap();
+    assert_eq!(plans.len(), 5);
+
+    // Convert rows 1 and 3 only; rows 0, 2, 4 must stay byte-identical.
+    let (positions, warnings) = filter_plans_by_rows(&plans, &[1, 3]);
+    assert_eq!(positions, vec![1, 3]);
+    assert_eq!(warnings.len(), 3);
+
+    let (out, report) = convert_selected(&orig, &[1, 3]);
+    assert_eq!(report.converted.len(), 2);
+
+    let orig_events = flp::parse_events(&orig).unwrap();
+    let out_events = flp::parse_events(&out).unwrap();
+    assert_eq!(orig_events.len(), out_events.len());
+    let rewritten: HashSet<usize> = positions.iter().map(|&p| plans[p].event_index).collect();
+    for (i, (a, b)) in orig_events.iter().zip(&out_events).enumerate() {
+        if rewritten.contains(&i) {
+            assert_ne!(a.data, b.data, "event {i} must be rewritten");
+        } else {
+            assert_eq!(a.data, b.data, "event {i} must stay byte-identical");
+        }
+    }
+
+    // The converted file scans as 3 Serum (untouched) + 3 Serum2
+    // (2 converted + the 1 pre-existing instance).
+    let (instances, stats) = scan_serum_instances(&out).unwrap();
+    assert_eq!(instances.len(), 3);
+    assert_eq!(stats.serum2_count, 3);
+}
+
+fn serum_preset_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("serumpreset"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// `extract --serum2` on the real-project fixture writes exactly one
+/// parseable .SerumPreset (the fixture's single genuine Serum2 instance,
+/// controller presetName "Release Cut Piano"). Untracked fixture; skips when
+/// absent.
+#[test]
+fn extract_serum2_writes_preset() {
+    if !have_serina1() {
+        return;
+    }
+    let dir = temp_dir("serum2");
+    let out_dir = dir.join("out");
+    let status = Command::new(BIN)
+        .args(["extract", "--serum2", "-o"])
+        .arg(&out_dir)
+        .arg(serina1_fixture())
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "extract --serum2 failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let presets = serum_preset_files(&out_dir);
+    assert_eq!(presets.len(), 1, "{presets:?}");
+    let data = std::fs::read(&presets[0]).unwrap();
+    let (json, uncomp, format, foff) = serum2state::parse_xfer_json(&data).unwrap();
+    assert_eq!(format, 2);
+    assert!(json.contains("\"fileType\":\"SerumPreset\""), "{json}");
+    assert!(
+        json.contains("\"presetName\":\"Release Cut Piano\""),
+        "{json}"
+    );
+    assert!(json.contains("\"product\":\"Serum2\""), "{json}");
+
+    // hash == md5 of the zstd frame (container rule).
+    let frame = &data[foff..];
+    let mut h = Md5::new();
+    h.update(frame);
+    let expect_hash = format!("{:x}", h.finalize());
+    assert!(
+        json.contains(&format!("\"hash\":\"{expect_hash}\"")),
+        "hash mismatch: {json}"
+    );
+
+    // Body: authored format — 175 top-level keys, engine-type UI keys
+    // present, state-only `component` gone, preset name carried.
+    let body = serum2state::decode_zstd(frame).unwrap();
+    assert_eq!(body.len() as u32, uncomp);
+    let val = s2tree::decode_cbor(&body).unwrap();
+    let keys = val.as_map().expect("top-level map");
+    assert_eq!(keys.len(), 175);
+    assert!(val.get("component").is_none(), "component must be dropped");
+    for k in [
+        "WTOsc",
+        "Osc",
+        "MultiSampleOsc",
+        "SpectralOsc",
+        "GranularOsc",
+        "Filter",
+        "ClipPlayer",
+        "SerumGUI",
+        "fileType",
+        "presetName",
+        "presetAuthor",
+        "presetDescription",
+        "arpBankDisplayName",
+        "clipBankDisplayName",
+        "Oscillator0",
+        "Oscillator4",
+        "ModSlot63",
+        "Global0",
+    ] {
+        assert!(val.get(k).is_some(), "missing authored key {k}");
+    }
+    assert_eq!(
+        val.get("presetName").and_then(s2tree::Val::as_str),
+        Some("Release Cut Piano")
+    );
+
+    // Without the flag, no .SerumPreset files are written.
+    let out_plain = dir.join("out_plain");
+    let status = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_plain)
+        .arg(serina1_fixture())
+        .status()
+        .unwrap();
+    assert!(status.success(), "plain extract failed");
+    assert!(serum_preset_files(&out_plain).is_empty());
+}
+
+/// Structural round-trip over 5 real factory presets: parse → authored Val →
+/// re-encode container → parse again == same Val. Gated behind
+/// `FLPX_S2_CORPUS_DIR` (read-only third-party content; never read in CI).
+#[test]
+fn corpus_preset_round_trip() {
+    let Some(corpus) = std::env::var_os("FLPX_S2_CORPUS_DIR").map(PathBuf::from) else {
+        eprintln!("skipping: FLPX_S2_CORPUS_DIR not set");
+        return;
+    };
+    if !corpus.is_dir() {
+        eprintln!("skipping: corpus dir absent");
+        return;
+    }
+    let mut files: Vec<PathBuf> = globwalk_serum_presets(&corpus);
+    assert!(
+        !files.is_empty(),
+        "no .SerumPreset files under {}",
+        corpus.display()
+    );
+    files.sort();
+    let n = files.len();
+    let picks: Vec<usize> = [0, n / 4, n / 2, 3 * n / 4, n - 1].to_vec();
+    for idx in picks {
+        let path = &files[idx];
+        let data = std::fs::read(path).unwrap();
+        let (json, _, _, foff) = serum2state::parse_xfer_json(&data)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let meta = serum2state::controller_meta_from_json(&json);
+        let original = s2tree::decode_cbor(&serum2state::decode_zstd(&data[foff..]).unwrap())
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let n_keys = original.as_map().unwrap().len();
+        assert!(
+            (174..=178).contains(&n_keys),
+            "{}: unexpected top-level key count {n_keys}",
+            path.display()
+        );
+
+        let rebuilt = serum2state::build_preset_file(
+            &original,
+            serum2state::PresetHeader {
+                preset_name: meta.preset_name,
+                preset_author: meta.preset_author,
+                preset_description: meta.preset_description,
+            },
+        );
+        let (json2, _, _, foff2) = serum2state::parse_xfer_json(&rebuilt).unwrap();
+        let reparsed = s2tree::decode_cbor(&serum2state::decode_zstd(&rebuilt[foff2..]).unwrap())
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!(
+            s2tree::encode_cbor(&original),
+            s2tree::encode_cbor(&reparsed),
+            "{}: round-trip body mismatch",
+            path.display()
+        );
+        // The rebuilt container's hash matches its own frame.
+        let mut h = Md5::new();
+        h.update(&rebuilt[foff2..]);
+        assert!(json2.contains(&format!("\"hash\":\"{:x}\"", h.finalize())));
+    }
+}
+
+/// Collect `**/*.SerumPreset` below `dir` without external crates.
+fn globwalk_serum_presets(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("serumpreset"))
+            {
+                out.push(p);
+            }
+        }
+    }
+    out
 }

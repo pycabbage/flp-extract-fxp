@@ -1,9 +1,9 @@
-import { AlertCircleIcon, DownloadIcon, ExternalLinkIcon, RefreshCwIcon } from "lucide-react"
+import { AlertCircleIcon, ExternalLinkIcon } from "lucide-react"
 import { useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { EmptyState } from "@/components/empty-state"
-import { ResultsCard, type ScanResult } from "@/components/results-card"
+import { ProjectSection, type ProjectEntry } from "@/components/project-section"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   AlertDialog,
@@ -15,81 +15,127 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { UploadCard } from "@/components/upload-card"
-import {
-  buildZip,
-  downloadBlob,
-  downloadConverted,
-  formatBytes,
-  presetFilename,
-} from "@/lib/download"
-import {
-  convert,
-  initWasm,
-  scanDoc,
-  type ConvertOutcome,
-  type FlpDocHandle,
-  type Preset,
-} from "@/lib/wasm"
+import { collectFlpSources } from "@/lib/upload"
+import { initWasm, scanDoc, type FlpDocHandle } from "@/lib/wasm"
 
 import { ThemeProvider } from "./components/theme-provider"
 
 export default function App() {
-  const [result, setResult] = useState<ScanResult | null>(null)
-  const [doc, setDoc] = useState<FlpDocHandle | null>(null)
-  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
+  const [projects, setProjects] = useState<readonly ProjectEntry[]>([])
+  const projectsRef = useRef<readonly ProjectEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [fatalError, setFatalError] = useState<string | null>(null)
-  const [converting, setConverting] = useState(false)
-  const [converted, setConverted] = useState<ConvertOutcome | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const nextIdRef = useRef(0)
   const [dragging, setDragging] = useState(false)
 
-  const rows = result?.presets ?? []
-  const allSelected = rows.length > 0 && selected.size === rows.length
-  const someSelected = selected.size > 0 && selected.size < rows.length
+  const commitProjects = (next: readonly ProjectEntry[]) => {
+    projectsRef.current = next
+    setProjects(next)
+  }
 
-  const handleFile = async (file: File) => {
+  const nextProjectId = () => {
+    nextIdRef.current += 1
+    return `project-${nextIdRef.current}`
+  }
+
+  const toMessage = (err: unknown, fallback: string) => {
+    if (err instanceof Error) return err.message
+    const text = String(err)
+    return text.length > 0 ? text : fallback
+  }
+
+  const handleFiles = async (files: readonly File[]) => {
+    if (files.length === 0) return
     setLoading(true)
     setError(null)
-    setFatalError(null)
-    setSelected(new Set())
-    setConverted(null)
     try {
       await initWasm()
-      const data = new Uint8Array(await file.arrayBuffer())
-      const scanned = scanDoc(data)
-      doc?.free()
-      setDoc(scanned)
-      const unique = scanned.presets.filter((p) => !p.duplicate)
-      const duplicates = scanned.presets.length - unique.length
-      setResult({
-        fileName: file.name,
-        fileData: data,
-        presets: unique,
-        duplicates,
-        serum2Skipped: scanned.serum2Skipped,
-        failed: scanned.failedJson,
-      })
-      if (unique.length === 0 && scanned.failedJson.length > 0) {
-        toast.error(`No presets extracted from ${file.name}`)
-      } else {
+      const collected = await collectFlpSources(files)
+      if (collected.sources.length === 0) {
+        const message =
+          collected.failures.length > 0
+            ? collected.failures.join(" ")
+            : collected.ignoredEntries > 0
+              ? `No .flp files found — ${collected.ignoredEntries} unsupported file${
+                  collected.ignoredEntries === 1 ? "" : "s"
+                } ignored.`
+              : "No .flp files found."
+        setError(message)
+        toast.error(message)
+        return
+      }
+      const next = [...projectsRef.current]
+      const replacedDocs: FlpDocHandle[] = []
+      const scanFailures: string[] = []
+      const loaded: ProjectEntry[] = []
+      for (const source of collected.sources) {
+        try {
+          const scanned = scanDoc(source.data)
+          const unique = scanned.presets.filter((p) => !p.duplicate)
+          const duplicates = scanned.presets.length - unique.length
+          const entry: ProjectEntry = {
+            id: nextProjectId(),
+            result: {
+              fileName: source.name,
+              fileData: source.data,
+              presets: unique,
+              duplicates,
+              serum2Skipped: scanned.serum2Skipped,
+              failed: scanned.failedJson,
+            },
+            doc: scanned,
+          }
+          const existingIndex = next.findIndex((p) => p.result.fileName === source.name)
+          if (existingIndex >= 0) {
+            replacedDocs.push(next[existingIndex].doc)
+            next[existingIndex] = entry
+          } else {
+            next.push(entry)
+          }
+          loaded.push(entry)
+          if (unique.length === 0 && scanned.failedJson.length > 0) {
+            toast.error(`No presets extracted from ${source.name}`)
+          }
+          for (const message of scanned.failedJson) {
+            toast.warning(`${source.name}: ${message}`)
+          }
+        } catch (err) {
+          scanFailures.push(`${source.name}: ${toMessage(err, "Failed to scan the file.")}`)
+        }
+      }
+      commitProjects(next)
+      for (const doc of replacedDocs) {
+        doc.free()
+      }
+      if (loaded.length > 0) {
+        const presetTotal = loaded.reduce((sum, p) => sum + p.result.presets.length, 0)
+        const ignoredNote =
+          collected.ignoredEntries > 0
+            ? ` — ${collected.ignoredEntries} unsupported file${
+                collected.ignoredEntries === 1 ? "" : "s"
+              } ignored`
+            : ""
         toast.success(
-          `Loaded ${unique.length} preset${unique.length === 1 ? "" : "s"}` +
-            (duplicates > 0
-              ? ` (${duplicates} duplicate${duplicates === 1 ? "" : "s"} ignored)`
-              : "")
+          `Loaded ${loaded.length} project${loaded.length === 1 ? "" : "s"} with ${presetTotal} unique preset${
+            presetTotal === 1 ? "" : "s"
+          }${ignoredNote}`
         )
       }
-      for (const message of scanned.failedJson) {
-        toast.warning(message)
+      for (const failure of collected.failures) {
+        toast.error(failure)
+      }
+      if (loaded.length === 0) {
+        const message =
+          scanFailures.length > 0 ? scanFailures.join(" ") : "No .flp files could be scanned."
+        setError(message)
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to scan the file."
+      const message = toMessage(err, "Failed to scan the files.")
       setError(message)
       toast.error(message)
     } finally {
@@ -98,101 +144,16 @@ export default function App() {
   }
 
   const onInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (file) void handleFile(file)
+    const files = Array.from(event.target.files ?? [])
+    if (files.length > 0) void handleFiles(files)
     event.target.value = ""
   }
 
   const onDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     setDragging(false)
-    const file = event.dataTransfer.files?.[0]
-    if (file) void handleFile(file)
-  }
-
-  const toggleRow = (index: number, checked: boolean) => {
-    setSelected((prev) => {
-      const next = new Set(prev)
-      if (checked) next.add(index)
-      else next.delete(index)
-      return next
-    })
-  }
-
-  const toggleAll = () => {
-    setSelected((prev) =>
-      prev.size === rows.length ? new Set() : new Set(rows.map((r) => r.index))
-    )
-  }
-
-  const downloadOne = (preset: Preset) => {
-    if (!doc) return
-    try {
-      const bytes = doc.buildFxp(preset.index)
-      const name = presetFilename(preset)
-      downloadBlob(bytes, name)
-      toast.success(`Downloaded ${name} (${formatBytes(bytes.length)})`)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to build the .fxp."
-      toast.error(message)
-    }
-  }
-
-  const downloadSelectedZip = () => {
-    if (!result || !doc) return
-    const chosen = rows.filter((r) => selected.has(r.index))
-    if (chosen.length === 0) return
-    try {
-      const zip = buildZip((index) => doc.buildFxp(index), chosen)
-      const base = result.fileName.replace(/\.[^.]+$/, "") || "presets"
-      const name = `${base}-selected.zip`
-      downloadBlob(zip, name)
-      toast.success(`Downloaded ${name} (${chosen.length} presets, ${formatBytes(zip.length)})`)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to build the ZIP."
-      toast.error(message)
-    }
-  }
-
-  const downloadZip = () => {
-    if (!result || !doc) return
-    if (rows.length === 0) return
-    try {
-      const zip = buildZip((index) => doc.buildFxp(index), rows)
-      const base = result.fileName.replace(/\.[^.]+$/, "") || "presets"
-      const name = `${base}-fxp.zip`
-      downloadBlob(zip, name)
-      toast.success(`Downloaded ${name} (${rows.length} presets, ${formatBytes(zip.length)})`)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to build the ZIP."
-      toast.error(message)
-    }
-  }
-
-  const handleConvert = () => {
-    if (!result) return
-    setConverting(true)
-    try {
-      const outcome = convert(result.fileData)
-      setConverted(outcome)
-      downloadConverted(result.fileName, outcome)
-      toast.success(
-        `Converted ${outcome.convertedCount} Serum instance${outcome.convertedCount === 1 ? "" : "s"}`
-      )
-      for (const warning of outcome.warnings) {
-        toast.warning(warning)
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to convert the file."
-      toast.error(message)
-    } finally {
-      setConverting(false)
-    }
-  }
-
-  const downloadConvertedAgain = () => {
-    if (!result || !converted) return
-    downloadConverted(result.fileName, converted)
+    const files = Array.from(event.dataTransfer.files)
+    if (files.length > 0) void handleFiles(files)
   }
 
   return (
@@ -229,6 +190,7 @@ export default function App() {
             ref={inputRef}
             type="file"
             accept=".flp,.zip"
+            multiple
             className="hidden"
             onChange={onInputChange}
           />
@@ -260,50 +222,14 @@ export default function App() {
             </AlertDialog>
           )}
 
-          {result === null && !loading && !error && <EmptyState />}
+          {projects.length === 0 && !loading && !error && <EmptyState />}
 
-          {result && (
-            <ResultsCard
-              result={result}
-              selected={selected}
-              allSelected={allSelected}
-              someSelected={someSelected}
-              onToggleAll={toggleAll}
-              onToggleRow={toggleRow}
-              onDownloadOne={downloadOne}
-              onDownloadSelectedZip={downloadSelectedZip}
-              onDownloadZip={downloadZip}
-            />
-          )}
-
-          {result && (
-            <Card>
-              <CardContent className="flex flex-wrap items-center gap-2">
-                <Button
-                  size="sm"
-                  disabled={converting || rows.length === 0}
-                  onClick={handleConvert}
-                >
-                  <RefreshCwIcon /> Convert to Serum2
-                </Button>
-                {converted && (
-                  <>
-                    <Button size="sm" variant="secondary" onClick={downloadConvertedAgain}>
-                      <DownloadIcon /> Download converted .flp
-                    </Button>
-                    <span className="text-muted-foreground text-sm">
-                      Converted {converted.convertedCount} Serum instance
-                      {converted.convertedCount === 1 ? "" : "s"} to Serum2 (warnings:{" "}
-                      {converted.warnings.length})
-                    </span>
-                  </>
-                )}
-              </CardContent>
-            </Card>
-          )}
+          {projects.map((project) => (
+            <ProjectSection key={project.id} project={project} />
+          ))}
 
           <footer className="text-muted-foreground mt-auto pt-4 text-center text-xs">
-            Runs fully client-side — your .flp file never leaves the browser.
+            Runs fully client-side — your .flp files never leave the browser.
           </footer>
         </div>
         <Toaster richColors position="bottom-right" />
