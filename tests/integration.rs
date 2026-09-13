@@ -1342,6 +1342,196 @@ fn convert_rejects_out_for_multi_member_zip() {
     assert!(stderr.contains("--out cannot be used"), "{stderr}");
 }
 
+/// Directory tree for input-resolution tests:
+///
+/// ```text
+/// root/
+///   alpha.flp  beta.FLP  c.flp  notes.txt
+///   sub/gamma.flp
+///   sub/deep/delta.flp
+/// ```
+fn resolve_tree(tag: &str) -> PathBuf {
+    let root = temp_dir(tag);
+    for rel in [
+        "alpha.flp",
+        "beta.FLP",
+        "c.flp",
+        "notes.txt",
+        "sub/gamma.flp",
+        "sub/deep/delta.flp",
+    ] {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        if rel.to_ascii_lowercase().ends_with(".flp") {
+            std::fs::write(&path, synthetic_flp()).unwrap();
+        } else {
+            std::fs::write(&path, b"definitely not a flp").unwrap();
+        }
+    }
+    root
+}
+
+fn resolved_count(stdout: &str) -> usize {
+    stdout.matches(": 1 Serum preset(s)").count()
+}
+
+#[test]
+fn list_resolves_directory_recursively() {
+    let root = resolve_tree("resolve_dir");
+    let output = Command::new(BIN).arg("list").arg(&root).output().unwrap();
+    assert!(
+        output.status.success(),
+        "list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Expected paths are joined component-wise so the comparison is
+    // platform-neutral: the binary prints paths with the platform separator
+    // (`\` on Windows, `/` elsewhere), and `PathBuf::join("sub/gamma.flp")`
+    // would embed a literal `/` in the expected string on Windows.
+    let expected: [&[&str]; 4] = [
+        &["alpha.flp"],
+        &["beta.FLP"],
+        &["sub", "gamma.flp"],
+        &["sub", "deep", "delta.flp"],
+    ];
+    for rel in expected {
+        let mut p = root.clone();
+        for part in rel {
+            p.push(part);
+        }
+        assert!(
+            stdout.contains(p.to_str().unwrap()),
+            "missing {rel:?}:\n{stdout}"
+        );
+    }
+    // Non-.flp files are never collected (or read).
+    assert!(!stdout.contains("notes.txt"), "{stdout}");
+    // Deterministic (sorted) order.
+    let a = stdout.find("alpha.flp").unwrap();
+    let b = stdout.find("beta.FLP").unwrap();
+    let d = stdout.find("delta.flp").unwrap();
+    let g = stdout.find("gamma.flp").unwrap();
+    assert!(a < b && b < d && d < g, "{stdout}");
+}
+
+#[test]
+fn list_resolves_recursive_glob() {
+    let root = resolve_tree("resolve_glob2");
+    let pattern = root.join("**").join("*.flp");
+    let output = Command::new(BIN)
+        .arg("list")
+        .arg(&pattern)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // `**` matches zero or more levels: 3 top-level + sub/ + sub/deep/.
+    assert_eq!(resolved_count(&String::from_utf8_lossy(&output.stdout)), 5);
+}
+
+#[test]
+fn list_resolves_single_star_glob() {
+    let root = resolve_tree("resolve_glob1");
+    let pattern = root.join("*.flp");
+    let output = Command::new(BIN)
+        .arg("list")
+        .arg(&pattern)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Top level only: alpha.flp, beta.FLP, c.flp.
+    assert_eq!(resolved_count(&stdout), 3, "{stdout}");
+    assert!(!stdout.contains("gamma.flp"), "{stdout}");
+    assert!(!stdout.contains("delta.flp"), "{stdout}");
+}
+
+#[test]
+fn list_resolves_question_mark_glob() {
+    let root = resolve_tree("resolve_glob_q");
+    let pattern = root.join("?.flp");
+    let output = Command::new(BIN)
+        .arg("list")
+        .arg(&pattern)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // `?` is exactly one character, so only c.flp matches (alpha.flp is too
+    // long and beta.FLP has the wrong extension length as well).
+    assert_eq!(resolved_count(&stdout), 1, "{stdout}");
+    assert!(stdout.contains("c.flp"), "{stdout}");
+}
+
+#[test]
+fn list_empty_directory_errors() {
+    let dir = temp_dir("resolve_empty");
+    let output = Command::new(BIN).arg("list").arg(&dir).output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("no .flp files found in {}", dir.display())),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn list_unmatched_glob_errors() {
+    let root = resolve_tree("resolve_glob_miss");
+    let pattern = root.join("**").join("*.zzz");
+    let output = Command::new(BIN)
+        .arg("list")
+        .arg(&pattern)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("no .flp files found in {}", pattern.display())),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn extract_resolves_directory() {
+    let root = resolve_tree("resolve_extract");
+    let out_dir = root.join("out");
+    let status = Command::new(BIN)
+        .arg("extract")
+        .arg("-o")
+        .arg(&out_dir)
+        .arg(&root)
+        .status()
+        .unwrap();
+    assert!(status.success(), "extract failed");
+    assert!(out_dir.join("01_SynthTest.fxp").exists());
+}
+
+#[test]
+fn convert_resolves_before_single_input_check() {
+    let root = resolve_tree("resolve_convert");
+    let out = root.join("conv.flp");
+    // The tree resolves to 5 inputs, so --out must be rejected. Proves the
+    // convert inputs flow through resolve_inputs before the arity check.
+    let output = Command::new(BIN)
+        .arg("convert")
+        .arg("--out")
+        .arg(&out)
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--out can only be used with a single input file"),
+        "{stderr}"
+    );
+}
+
 /// Apply the same plan-narrowing pipeline the wasm `convert_flp_selected`
 /// uses: rows -> `filter_plans_by_rows` -> bundles -> `apply`.
 fn convert_selected(
