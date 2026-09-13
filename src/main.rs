@@ -27,8 +27,14 @@ use flp_extract_fxp::report::{
     PresetEntry, ValidateInputReport, ValidateReport,
 };
 use flp_extract_fxp::{flpconv, fxp, serum, serum2state};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// The built-in naming template. It must keep reproducing the pre-template
+/// output byte-exactly - including how duplicate preset names were
+/// disambiguated (see [`next_output_file_name`]).
+const DEFAULT_NAME_TEMPLATE: &str = "{index}_{preset}";
 
 /// Fallback label for report messages (`-` when empty).
 fn display_name(name: &str) -> &str {
@@ -70,6 +76,14 @@ enum Command {
         /// Keep extracting even when a preset fails Serum2 validation.
         #[arg(long)]
         keep_invalid: bool,
+        /// Output file name template. Placeholders: {index} {preset}
+        /// {channel} {author} {category}; unknown ones resolve to empty and
+        /// each substituted value is sanitized separately. Literal template
+        /// text is used verbatim, so '/', '\' and '..' written there can
+        /// create subdirectories or escape the --out directory.
+        /// Example: --name-template "{preset}_{author}"
+        #[arg(long, default_value = DEFAULT_NAME_TEMPLATE)]
+        name_template: String,
         /// Write presets whose content hash duplicates an earlier one anyway.
         #[arg(long)]
         keep_duplicates: bool,
@@ -177,11 +191,136 @@ fn print_warning(doc: &core::FlpInput, msg: &str) {
     }
 }
 
+/// Sanitize one substituted template value. Unlike [`sanitize_filename`],
+/// an empty value stays empty so that all-empty renders can be detected and
+/// routed through the fallback chain.
+fn sanitize_template_value(value: &str) -> String {
+    if value.is_empty() {
+        String::new()
+    } else {
+        sanitize_filename(value)
+    }
+}
+
+/// The current base-name fallback chain: preset name -> channel name ->
+/// `Serum N` (unsanitized). It backs the `{preset}` placeholder - so the
+/// default template `{index}_{preset}` reproduces today's names exactly -
+/// and the fallback for templates that render to an empty name.
+fn naming_fallback<'a>(index: usize, preset: &'a str, channel: &'a str) -> Cow<'a, str> {
+    if !preset.is_empty() {
+        Cow::Borrowed(preset)
+    } else if !channel.is_empty() {
+        Cow::Borrowed(channel)
+    } else {
+        Cow::Owned(format!("Serum {index}"))
+    }
+}
+
+/// Render an output file name template for one instance.
+///
+/// Placeholders: `{index}` (1-based, zero-padded to two digits), `{preset}`
+/// (follows the preset -> channel -> `Serum N` fallback chain), `{channel}`,
+/// `{author}`, `{category}`. Unknown placeholders resolve to empty, as do
+/// empty values, and every substituted value is sanitized on its own - never
+/// the template as a whole, so hostile preset metadata cannot inject path
+/// separators. Template literals are kept verbatim (the user's own input).
+/// A render that ends up empty falls back to the existing naming chain.
+fn render_name_template(
+    template: &str,
+    index: usize,
+    preset: &str,
+    channel: &str,
+    author: &str,
+    category: &str,
+) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) => {
+                let value = match &after[..close] {
+                    "index" => format!("{index:02}"),
+                    "preset" => naming_fallback(index, preset, channel).into_owned(),
+                    "channel" => channel.to_string(),
+                    "author" => author.to_string(),
+                    "category" => category.to_string(),
+                    _ => String::new(),
+                };
+                out.push_str(&sanitize_template_value(&value));
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push_str(&rest[open..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    if out.is_empty() {
+        sanitize_filename(&naming_fallback(index, preset, channel))
+    } else {
+        out
+    }
+}
+
+/// The base name for one instance under `name_template`.
+///
+/// For [`DEFAULT_NAME_TEMPLATE`] this is the index-free legacy base
+/// (sanitized fallback chain): the `{index}` prefix and the duplicate suffix
+/// are added by [`next_output_file_name`], keyed on this base, so the default
+/// output stays byte-exact with the pre-template naming. Any other template
+/// renders to the full name, which is also the dedup key.
+fn template_base(
+    name_template: &str,
+    index: usize,
+    preset: &str,
+    channel: &str,
+    author: &str,
+    category: &str,
+) -> String {
+    if name_template == DEFAULT_NAME_TEMPLATE {
+        sanitize_filename(&naming_fallback(index, preset, channel))
+    } else {
+        render_name_template(name_template, index, preset, channel, author, category)
+    }
+}
+
+/// Consume one dedup slot for `base` and build the output file name.
+///
+/// Under the default template the suffix is inserted between the index
+/// prefix and the base name (`01_Lead.fxp`, then `02_Lead_2.fxp`) - exactly
+/// the pre-template layout, because dedup keys on the index-free base.
+/// Custom templates key dedup on the whole rendered name and append the
+/// suffix at the end (`Lead.fxp`, then `Lead_2.fxp`).
+fn next_output_file_name(
+    used_names: &mut HashMap<String, usize>,
+    base: &str,
+    index: usize,
+    is_default_template: bool,
+) -> String {
+    let count = used_names.entry(base.to_string()).or_insert(0);
+    *count += 1;
+    if is_default_template {
+        if *count == 1 {
+            format!("{index:02}_{base}.fxp")
+        } else {
+            format!("{index:02}_{base}_{count}.fxp")
+        }
+    } else if *count == 1 {
+        format!("{base}.fxp")
+    } else {
+        format!("{base}_{count}.fxp")
+    }
+}
+
 fn run_extract(
     inputs: &[PathBuf],
     out_dir_opt: Option<&PathBuf>,
     overwrite: bool,
     keep_invalid: bool,
+    name_template: &str,
     keep_duplicates: bool,
     serum2: bool,
     out: &Out,
@@ -280,14 +419,14 @@ fn run_extract(
                 let report = fxp::validate_chunk_report(&inst.chunk.chunk);
                 let warnings: Vec<String> = report.warnings().map(str::to_string).collect();
                 let errors: Vec<String> = report.fatals().map(str::to_string).collect();
-                let base_name: String = if !inst.chunk.meta.preset_name.is_empty() {
-                    inst.chunk.meta.preset_name.clone()
-                } else if !inst.channel_name.is_empty() {
-                    inst.channel_name.clone()
-                } else {
-                    format!("Serum {}", i + 1)
-                };
-                let base = sanitize_filename(&base_name);
+                let base = template_base(
+                    name_template,
+                    i + 1,
+                    &inst.chunk.meta.preset_name,
+                    &inst.channel_name,
+                    &inst.chunk.meta.author,
+                    &inst.chunk.meta.category,
+                );
                 let mut push_entry = |status: ExtractStatus, path: Option<String>| {
                     entries.push(ExtractEntry {
                         index: i as u32,
@@ -323,13 +462,12 @@ fn run_extract(
                 }
 
                 let file = fxp::build_fxp(&inst.chunk.chunk, &inst.chunk.meta.preset_name);
-                let count = used_names.entry(base.clone()).or_insert(0);
-                *count += 1;
-                let file_name = if *count == 1 {
-                    format!("{:02}_{}.fxp", i + 1, base)
-                } else {
-                    format!("{:02}_{}_{}.fxp", i + 1, base, count)
-                };
+                let file_name = next_output_file_name(
+                    &mut used_names,
+                    &base,
+                    i + 1,
+                    name_template == DEFAULT_NAME_TEMPLATE,
+                );
                 let path = out_dir.join(&file_name);
                 if path.exists() && !overwrite {
                     eprintln!(
@@ -1204,6 +1342,7 @@ fn main() {
             out: out_dir,
             overwrite,
             keep_invalid,
+            name_template,
             keep_duplicates,
             serum2,
             ..
@@ -1212,6 +1351,7 @@ fn main() {
             out_dir.as_ref(),
             *overwrite,
             *keep_invalid,
+            name_template,
             *keep_duplicates,
             *serum2,
             &out,
@@ -1276,5 +1416,130 @@ fn main() {
     }
     if code != 0 {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_template_reproduces_current_naming() {
+        assert_eq!(
+            render_name_template("{index}_{preset}", 3, "Lead", "Ch", "A", "C"),
+            "03_Lead"
+        );
+        // {preset} carries the existing fallback chain, so unnamed presets
+        // keep today's channel / "Serum N" names under the default template.
+        assert_eq!(
+            render_name_template("{index}_{preset}", 2, "", "Chan", "", ""),
+            "02_Chan"
+        );
+        assert_eq!(
+            render_name_template("{index}_{preset}", 4, "", "", "", ""),
+            "04_Serum 4"
+        );
+    }
+
+    #[test]
+    fn template_placeholders_and_unknowns() {
+        assert_eq!(
+            render_name_template("{preset}_{author}", 1, "Lead", "Ch", "X", "C"),
+            "Lead_X"
+        );
+        assert_eq!(
+            render_name_template("{channel}_{category}", 1, "P", "Bass", "A", "Cat"),
+            "Bass_Cat"
+        );
+        // Unknown placeholders resolve to empty; a render that is left
+        // entirely empty falls back to the naming chain (see the test
+        // below), so only non-empty renders show the raw substitution.
+        assert_eq!(render_name_template("{bogus}", 1, "P", "Ch", "A", "C"), "P");
+        assert_eq!(
+            render_name_template("x{nope}y", 1, "P", "Ch", "A", "C"),
+            "xy"
+        );
+        // An unclosed brace is kept as literal text.
+        assert_eq!(
+            render_name_template("weird{x", 1, "P", "", "", ""),
+            "weird{x"
+        );
+    }
+
+    #[test]
+    fn template_values_are_sanitized_individually() {
+        // Hostile metadata cannot inject path separators...
+        assert_eq!(
+            render_name_template("{preset}", 1, "../../etc/passwd", "Ch", "", ""),
+            "_.._etc_passwd"
+        );
+        assert_eq!(
+            render_name_template("{author}", 1, "P", "Ch", "a/b\\c:d", ""),
+            "a_b_c_d"
+        );
+        // ...while template literals are the caller's own responsibility.
+        assert_eq!(
+            render_name_template("a/b_{preset}", 1, "P", "", "", ""),
+            "a/b_P"
+        );
+    }
+
+    #[test]
+    fn default_template_duplicates_match_legacy_names() {
+        // Regression: under the default template dedup must key on the
+        // index-free base, so two presets named "Lead" come out as
+        // 01_Lead.fxp / 02_Lead_2.fxp (suffix between index and base),
+        // byte-exact with the pre-template naming - not 01_Lead.fxp /
+        // 02_Lead.fxp, which is what keying on the templated name produced.
+        let mut used_names: HashMap<String, usize> = HashMap::new();
+        let mut names = Vec::new();
+        for i in 0..3 {
+            let index = i + 1;
+            let preset = if i == 2 { "Bass" } else { "Lead" };
+            let base = template_base(DEFAULT_NAME_TEMPLATE, index, preset, "Ch", "", "");
+            names.push(next_output_file_name(&mut used_names, &base, index, true));
+        }
+        assert_eq!(names, ["01_Lead.fxp", "02_Lead_2.fxp", "03_Bass.fxp"]);
+    }
+
+    #[test]
+    fn custom_template_duplicates_get_suffix() {
+        // Custom templates dedup on the whole rendered name; identical
+        // renders get a _N suffix appended at the end.
+        let mut used_names: HashMap<String, usize> = HashMap::new();
+        let mut names = Vec::new();
+        for i in 0..2 {
+            let index = i + 1;
+            let base = template_base("{preset}", index, "Lead", "", "A", "C");
+            names.push(next_output_file_name(&mut used_names, &base, index, false));
+        }
+        assert_eq!(names, ["Lead.fxp", "Lead_2.fxp"]);
+        // Distinct renders never collide, even when they differ only in the
+        // index...
+        assert_eq!(
+            template_base("{preset}_{index}", 1, "Lead", "", "", ""),
+            "Lead_01"
+        );
+        assert_eq!(
+            template_base("{preset}_{index}", 2, "Lead", "", "", ""),
+            "Lead_02"
+        );
+        // ...and the default template's base is the index-free legacy base.
+        assert_eq!(
+            template_base(DEFAULT_NAME_TEMPLATE, 7, "Lead", "Ch", "", ""),
+            "Lead"
+        );
+    }
+
+    #[test]
+    fn empty_template_render_falls_back() {
+        // Empty values stay empty (not "Untitled"), so an all-empty render
+        // is detected and routed through the fallback chain.
+        assert_eq!(render_name_template("{author}", 1, "P", "Ch", "", ""), "P");
+        assert_eq!(
+            render_name_template("{unknown}", 5, "", "", "", ""),
+            "Serum 5"
+        );
+        assert_eq!(render_name_template("", 7, "", "Chan", "", ""), "Chan");
     }
 }

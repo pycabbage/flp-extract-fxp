@@ -30,23 +30,31 @@ fn zlib_stream(data: &[u8]) -> Vec<u8> {
 }
 
 /// A synthetic Serum chunk: zlib(preset state) + zlib(table data) + trailer.
-fn synthetic_serum1_chunk() -> Vec<u8> {
+/// `table_filler` varies the embedded table data (but not the preset state),
+/// producing a distinct chunk hash while keeping the same preset name -
+/// i.e. a duplicate-name case that survives the duplicate-chunk skip.
+fn synthetic_serum1_chunk_with(table_filler: u8) -> Vec<u8> {
     let mut s0 = vec![0u8; 172_736];
     let name = b"SynthTest";
     s0[0x4972..0x4972 + name.len()].copy_from_slice(name);
     s0[0x4994..0x4998].copy_from_slice(&0.1631f32.to_le_bytes());
     let z0 = zlib_stream(&s0);
-    let z1 = zlib_stream(&vec![0u8; 8192]);
+    let z1 = zlib_stream(&vec![table_filler; 8192]);
     let mut chunk = z0.clone();
     chunk.extend_from_slice(&z1);
     chunk.extend_from_slice(&(z0.len() as u32).to_le_bytes());
     chunk
 }
 
+/// The plain zero-filled variant used by main's synthetic helpers.
+fn synthetic_serum1_chunk() -> Vec<u8> {
+    synthetic_serum1_chunk_with(0)
+}
+
 /// FL Studio's VST3 wrapper state: prologue + cid1(64B) + cid3(plugin state)
 /// + cid4(8B).
-fn synthetic_vst3_wrapper_state() -> Vec<u8> {
-    let cid3 = synthetic_serum1_chunk();
+fn synthetic_vst3_wrapper_state_with(table_filler: u8) -> Vec<u8> {
+    let cid3 = synthetic_serum1_chunk_with(table_filler);
     let mut state = Vec::new();
     state.extend_from_slice(&[1, 0, 0, 0]);
     for (cid, payload) in [(1u32, vec![0u8; 64]), (3u32, cid3), (4u32, vec![0u8; 8])] {
@@ -57,10 +65,19 @@ fn synthetic_vst3_wrapper_state() -> Vec<u8> {
     state
 }
 
+/// The plain zero-filled variant used by main's synthetic tests.
+fn synthetic_vst3_wrapper_state() -> Vec<u8> {
+    synthetic_vst3_wrapper_state_with(0)
+}
+
 /// PluginParams (event 213) payload: version + chunk id/size records,
 /// including every cid `apply` needs to rebuild a Serum2 wrapper.
 fn synthetic_plugin_params() -> Vec<u8> {
-    let state = synthetic_vst3_wrapper_state();
+    synthetic_plugin_params_with(0)
+}
+
+fn synthetic_plugin_params_with(table_filler: u8) -> Vec<u8> {
+    let state = synthetic_vst3_wrapper_state_with(table_filler);
     let cid1: [u8; 20] = [
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x0C, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
@@ -132,18 +149,7 @@ fn encode_flp(events: &[(u8, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
-/// Minimal FLP: FLhd + FLdt containing NewChan + channel name + PluginParams.
-fn synthetic_flp() -> Vec<u8> {
-    synthetic_flp_channel("Bass")
-}
-
-fn synthetic_flp_channel(channel: &str) -> Vec<u8> {
-    let events: Vec<(u8, Vec<u8>)> = vec![
-        (64, vec![0, 0]),                   // NewChan: channel 0
-        (203, channel.as_bytes().to_vec()), // channel name
-        (213, synthetic_plugin_params()),
-    ];
-
+fn flp_from_events(events: Vec<(u8, Vec<u8>)>) -> Vec<u8> {
     let mut dt = Vec::new();
     for (id, data) in events {
         dt.push(id);
@@ -160,6 +166,33 @@ fn synthetic_flp_channel(channel: &str) -> Vec<u8> {
     out.extend_from_slice(&(dt.len() as u32).to_le_bytes());
     out.extend_from_slice(&dt);
     out
+}
+
+/// Minimal FLP: FLhd + FLdt containing NewChan + channel name + PluginParams.
+fn synthetic_flp() -> Vec<u8> {
+    synthetic_flp_channel("Bass")
+}
+
+fn synthetic_flp_channel(channel: &str) -> Vec<u8> {
+    flp_from_events(vec![
+        (64, vec![0, 0]),                   // NewChan: channel 0
+        (203, channel.as_bytes().to_vec()), // channel name
+        (213, synthetic_plugin_params()),
+    ])
+}
+
+/// Two channels ("Bass", "Lead"), each holding a Serum instance with the
+/// same preset name "SynthTest" but distinct chunk content, so both survive
+/// the duplicate-chunk skip and reach naming as duplicate preset names.
+fn synthetic_flp_duplicate_preset_names() -> Vec<u8> {
+    flp_from_events(vec![
+        (64, vec![0, 0]),        // NewChan: channel 0
+        (203, b"Bass".to_vec()), // channel name
+        (213, synthetic_plugin_params_with(0)),
+        (64, vec![1, 0]),        // NewChan: channel 1
+        (203, b"Lead".to_vec()), // channel name
+        (213, synthetic_plugin_params_with(1)),
+    ])
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
@@ -196,6 +229,77 @@ fn extract_from_synthetic_flp_then_validate() {
         .status()
         .unwrap();
     assert!(status.success(), "validate failed");
+}
+
+#[test]
+fn extract_honors_name_template() {
+    let dir = temp_dir("template");
+    let flp_path = dir.join("test_project.flp");
+    std::fs::write(&flp_path, synthetic_flp()).unwrap();
+
+    let out_dir = dir.join("out");
+    let status = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_dir)
+        .args(["--name-template", "{channel}_{index}"])
+        .arg(&flp_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "extract failed");
+
+    // Synthetic FLP: channel "Bass", preset "SynthTest" -> template wins.
+    let fxp_path = out_dir.join("Bass_01.fxp");
+    assert!(fxp_path.exists(), "expected {}", fxp_path.display());
+    assert!(!out_dir.join("01_SynthTest.fxp").exists());
+}
+
+#[test]
+fn extract_default_template_duplicates_match_legacy_names() {
+    let dir = temp_dir("dup_default");
+    let flp_path = dir.join("test_project.flp");
+    std::fs::write(&flp_path, synthetic_flp_duplicate_preset_names()).unwrap();
+
+    let out_dir = dir.join("out");
+    let status = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_dir)
+        .arg(&flp_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "extract failed");
+
+    // Pre-template behavior: dedup keys on the index-free preset name, so
+    // the second "SynthTest" gets its suffix between the index and the base.
+    let first = out_dir.join("01_SynthTest.fxp");
+    let second = out_dir.join("02_SynthTest_2.fxp");
+    assert!(first.exists(), "expected {}", first.display());
+    assert!(second.exists(), "expected {}", second.display());
+    // The regression (dedup keyed on the templated name) produced a bare
+    // 02_SynthTest.fxp instead.
+    assert!(!out_dir.join("02_SynthTest.fxp").exists());
+}
+
+#[test]
+fn extract_custom_template_duplicates_get_suffix() {
+    let dir = temp_dir("dup_custom");
+    let flp_path = dir.join("test_project.flp");
+    std::fs::write(&flp_path, synthetic_flp_duplicate_preset_names()).unwrap();
+
+    let out_dir = dir.join("out");
+    let status = Command::new(BIN)
+        .args(["extract", "-o"])
+        .arg(&out_dir)
+        .args(["--name-template", "{preset}"])
+        .arg(&flp_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "extract failed");
+
+    // Custom templates dedup on the whole rendered name.
+    let first = out_dir.join("SynthTest.fxp");
+    let second = out_dir.join("SynthTest_2.fxp");
+    assert!(first.exists(), "expected {}", first.display());
+    assert!(second.exists(), "expected {}", second.display());
 }
 
 #[test]
