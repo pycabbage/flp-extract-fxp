@@ -29,6 +29,7 @@ import {
 } from "@/lib/download"
 import {
   convert,
+  convertSelected,
   initWasm,
   scanDoc,
   type ConvertOutcome,
@@ -174,11 +175,15 @@ export default function App() {
     if (!result) return
     setConverting(true)
     try {
-      const outcome = convert(result.fileData)
+      const chosen = rows.filter((r) => selected.has(r.index)).map((r) => r.index)
+      const outcome =
+        chosen.length === 0 ? convert(result.fileData) : convertSelected(result.fileData, chosen)
       setConverted(outcome)
       downloadConverted(result.fileName, outcome)
       toast.success(
-        `Converted ${outcome.convertedCount} Serum instance${outcome.convertedCount === 1 ? "" : "s"}`
+        chosen.length === 0
+          ? `Converted ${outcome.convertedCount} Serum instance${outcome.convertedCount === 1 ? "" : "s"}`
+          : `Converted ${outcome.convertedCount} of ${chosen.length} selected Serum instance${chosen.length === 1 ? "" : "s"}`
       )
       for (const warning of outcome.warnings) {
         toast.warning(warning)
@@ -285,7 +290,8 @@ export default function App() {
                   disabled={converting || rows.length === 0}
                   onClick={handleConvert}
                 >
-                  <RefreshCwIcon /> Convert to Serum2
+                  <RefreshCwIcon />{" "}
+                  {selected.size > 0 ? `Convert selected (${selected.size})` : "Convert to Serum2"}
                 </Button>
                 {converted && (
                   <>
