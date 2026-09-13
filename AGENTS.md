@@ -53,11 +53,16 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
   fails still prints its full report with an embedded `"error"` field before
   exiting 1 (aborting errors print `{"error": "..."}` instead). Without
   `--json` the historical output is unchanged.
+  `extract` dedupes presets by content hash across the whole batch (all input
+  files — and, for a zipped loop package, all members — in one invocation
+  share the `seen` index); duplicates are skipped with a
+  `duplicate of <file>:<nn>` message naming the first occurrence, unless
+  `--keep-duplicates` is given.
 
 ## Frontend + wasm (`front/`)
 
-- **Critical, non-obvious**: `front/src/lib/wasm.ts` imports
-  `flp-extract-fxp`; `front/package.json` depends on
+- **Critical, non-obvious**: `front/src/lib/wasm.ts` imports the
+  `flp-extract-fxp` package; `front/package.json` depends on
   `"flp-extract-fxp": "link:../pkg"`, i.e. the generated wasm package at the
   **repo-root `pkg/` directory** (gitignored, not checked in). It must be
   generated with `wasm-pack` before `pnpm dev`/`pnpm build` will even
@@ -113,9 +118,11 @@ Key constraints the code encodes (don't "fix" these without re-checking the
 docs above):
 - fxp header fields are **big-endian**; `byteSize` (offset 0x04) is the
   literal total file length, not the Steinberg-spec `fileLen − 8`.
-- Serum preset state is always 172,736 bytes; embedded metadata lives at
-  fixed offsets (name 0x4972, version f32 0x4994, author 0x49A0, category
-  0x49D0).
+- Serum preset state is 172,736 bytes for modern presets; legacy (2015-era)
+  presets carry 21,808 / 28,232-byte blobs and are zero-padded to 172,736 at
+  parse time (`src/s1state.rs::parse_preset`) — the same thing the real
+  Serum2 importer does. Embedded metadata lives at fixed offsets (name
+  0x4972, version f32 0x4994, author 0x49A0, category 0x49D0).
 - Serum2 plugin instances are intentionally never extracted (they use an
   `XferJson`-prefixed state, not the Serum chunk layout) — only counted.
 - Zipped loop packages (`PK`-prefixed ZIP exports) are unpacked in memory by
@@ -128,8 +135,16 @@ docs above):
   confirm entry layout/compression against a real export when one can be
   produced (see docs/flp-conversion.md → Surfaces).
 - `src/importer.rs` correctness is proven by **byte-identity tests** against
-  golden states produced by the REAL importer (called at runtime). Do not
+  golden states produced by the REAL importer (called at runtime) — modern
+  presets (`golden_byte_identical_*`) and legacy presets
+  (`legacy_golden_fl_*`, trees in `tests/fixtures/legacy/`). Do not
   "simplify" importer logic without re-running those tests.
+- Legacy (pre-0.162) presets need version-gated migrations that are no-ops
+  for modern blobs (dest restamps, classic LFO regions, aux-region shifts,
+  the pre-reorder distortion menu, legacy `[frames][tuning][noise]` stream
+  order, per-env enable flags). Known gap: `RoutingSlot4.kParamRoutingDest`
+  for `FL_FMItUp`/`FL_BASS_Adventure` (see docs/flp-conversion.md
+  limitation (a)) — don't "fix" it by guessing a value.
 - Converted processor states use **libzstd level-3 zstd frames** (`zstd`
   crate, `s2tree::zstd_frame`) — plugin-accepted (dynamically verified).
   libzstd compiles C code, so the wasm32 build needs clang (CI installs it in
@@ -152,6 +167,11 @@ CI) passes `cargo test` without them:
   processor states produced by the REAL importer (called at runtime) and
   accepted by the real plugin — ground truth for `golden_byte_identical_*`;
   don't regenerate/edit them casually.
+- `tests/fixtures/legacy/*.fxp` + `*_importer_tree.cbor` — 6 legacy
+  (2015-era) presets and the REAL importer's converted trees; ground truth
+  for `legacy_golden_fl_*` (4/6 byte-identical, 2 with the documented
+  RoutingSlot4 gap). Regenerate via the s1state_load harness (see
+  docs/flp-conversion.md §Verification).
 - `assets/` is gitignored and not present in the repo (used locally to hold
   real-world Serum fxp samples during format research) — don't expect it
   to exist or add tests that depend on it.

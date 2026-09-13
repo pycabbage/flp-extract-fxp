@@ -2,6 +2,7 @@ import { DownloadIcon, RefreshCwIcon } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 
+import { ConvertResultCard } from "@/components/convert-result-card"
 import { ResultsCard, type ScanResult } from "@/components/results-card"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -13,7 +14,13 @@ import {
   formatBytes,
   presetFilename,
 } from "@/lib/download"
-import { convert, type ConvertOutcome, type FlpDocHandle, type Preset } from "@/lib/wasm"
+import {
+  convert,
+  convertSelected,
+  type ConvertOutcome,
+  type FlpDocHandle,
+  type Preset,
+} from "@/lib/wasm"
 
 export type ProjectEntry = {
   readonly id: string
@@ -92,11 +99,15 @@ export function ProjectSection(props: { project: ProjectEntry }) {
   const handleConvert = () => {
     setConverting(true)
     try {
-      const outcome = convert(result.fileData)
+      const chosen = rows.filter((r) => selected.has(r.index)).map((r) => r.index)
+      const outcome =
+        chosen.length === 0 ? convert(result.fileData) : convertSelected(result.fileData, chosen)
       setConverted(outcome)
       downloadConverted(result.fileName, outcome)
       toast.success(
-        `Converted ${outcome.convertedCount} Serum instance${outcome.convertedCount === 1 ? "" : "s"}`
+        chosen.length === 0
+          ? `Converted ${outcome.convertedCount} Serum instance${outcome.convertedCount === 1 ? "" : "s"}`
+          : `Converted ${outcome.convertedCount} of ${chosen.length} selected Serum instance${chosen.length === 1 ? "" : "s"}`
       )
       for (const warning of outcome.warnings) {
         toast.warning(warning)
@@ -129,12 +140,13 @@ export function ProjectSection(props: { project: ProjectEntry }) {
       <Card>
         <CardContent className="flex flex-wrap items-center gap-2">
           <Button size="sm" disabled={converting || rows.length === 0} onClick={handleConvert}>
-            <RefreshCwIcon /> Convert to Serum2
+            <RefreshCwIcon />{" "}
+            {selected.size > 0 ? `Convert selected (${selected.size})` : "Convert to Serum2"}
           </Button>
           {converted && (
             <>
               <Button size="sm" variant="secondary" onClick={downloadConvertedAgain}>
-                <DownloadIcon /> Download converted
+                <DownloadIcon /> Download converted .flp
               </Button>
               <span className="text-muted-foreground text-sm">
                 Converted {converted.convertedCount} Serum instance
@@ -145,6 +157,9 @@ export function ProjectSection(props: { project: ProjectEntry }) {
           )}
         </CardContent>
       </Card>
+      {converted && (
+        <ConvertResultCard outcome={converted} inputSize={result.fileData.length} presets={rows} />
+      )}
     </>
   )
 }
