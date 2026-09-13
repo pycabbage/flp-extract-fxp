@@ -269,20 +269,28 @@ fn parse_mod_slots(blob: &[u8]) -> Vec<S1ModSlot> {
 
 /// Parse a raw Serum preset chunk (concatenated zlib streams + u32 LE
 /// trailer, i.e. `crate::serum::Serum1Chunk::chunk`) into a typed [`S1Preset`].
+///
+/// Legacy (2015-era) state blobs — [`S1_OLD_BLOB_SIZES`] — are accepted by
+/// zero-padding to [`S1_BLOB_SIZE`], which is byte-for-byte what the real
+/// Serum2 importer does (it inflates the chunk into a `memset`-zeroed
+/// 172,736-byte buffer with truncation tolerated; version-gated readers then
+/// pick the classic-layout regions out of the same buffer).
 pub fn parse_preset(chunk: &[u8]) -> Result<S1Preset, String> {
     // The trailer word is tolerated missing or stale (chunks recovered
     // through `crate::serum` are repaired before import).
     let (streams, _) = crate::zlibio::split_chunk(chunk)?;
-    let blob = streams[0].clone();
-    if blob.len() != S1_BLOB_SIZE {
+    let mut blob = streams[0].clone();
+    let legacy = blob.len() < S1_BLOB_SIZE;
+    if blob.len() > S1_BLOB_SIZE {
         return Err(format!(
-            "old-format Serum preset not supported by the converter \
-             (state blob is {} bytes, expected {S1_BLOB_SIZE})",
+            "Serum preset state blob is {} bytes, larger than the maximum of \
+             {S1_BLOB_SIZE}",
             blob.len()
         ));
     }
+    blob.resize(S1_BLOB_SIZE, 0);
     for (i, stream) in streams.iter().enumerate().skip(1) {
-        if stream.len() % FRAME_BYTES != 0 {
+        if stream.len() % FRAME_BYTES != 0 && !legacy {
             return Err(format!(
                 "appended data stream {i} is {} bytes, not a multiple of the \
                  {FRAME_BYTES}-byte wavetable frame size",
@@ -377,6 +385,21 @@ impl S1Preset {
         let base = match k {
             0..=3 => LFO_CLASSIC_1_4,
             4..=7 => LFO_CLASSIC_5_8,
+            _ => return None,
+        };
+        self.blob.get(base..base + LFO_CLASSIC_SIZE)
+    }
+
+    /// The classic-layout region the Serum2 importer normalizes LFO `k`
+    /// (k < 8) from: LFO 1-4 share the `0x0280` region, LFO 5-8 the `0x1B70`
+    /// region below version 0.148 and the `0x5558` region from 0.148 on
+    /// (importer gates 0x4DE2D6/0x4DE340); the sub-block index inside the
+    /// region is `k & 3` (importer fn_4f1eb0 0x4F1EB5).
+    pub fn classic_lfo_region(&self, k: usize, alt: bool) -> Option<&[u8]> {
+        let base = match (k, alt) {
+            (0..=3, _) => LFO_CLASSIC_1_4,
+            (4..=7, false) => LFO_CLASSIC_5_8,
+            (4..=7, true) => LFO_CLASSIC_ALT_5_8,
             _ => return None,
         };
         self.blob.get(base..base + LFO_CLASSIC_SIZE)
@@ -822,14 +845,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_old_format_blob() {
+    fn accepts_legacy_sized_blobs_via_padding() {
         for size in S1_OLD_BLOB_SIZES {
             let chunk = chunk_from(&vec![0u8; size], &[]);
-            let err = parse_preset(&chunk).unwrap_err();
-            assert!(
-                err.contains("old-format Serum preset not supported by the converter"),
-                "{err}"
-            );
+            let p = parse_preset(&chunk).expect("legacy-sized blob must parse");
+            assert_eq!(p.blob.len(), S1_BLOB_SIZE);
+            assert!(p.blob[size..].iter().all(|&b| b == 0));
         }
     }
 

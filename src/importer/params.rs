@@ -156,16 +156,21 @@ impl Ctx<'_> {
         let get_cell_type = |ctx: &Ctx| -> Option<String> {
             let arr = ctx.root.get("FXRack0")?.get("FX")?;
             match arr {
-                Val::Array(a) if a.len() > cell => a[cell]
-                    .get("kParamType")
-                    .and_then(|t| t.as_str())
-                    .map(String::from),
+                Val::Array(a) if a.len() > cell => match a[cell]
+                    .get(S2_PARAM_DESCS[FX_BASE_IDX[fam]].submap)
+                    .and_then(|sm| sm.get("plainParams"))
+                    .and_then(|pp| pp.get("kParamType"))
+                {
+                    Some(t) => t.as_str().map(String::from),
+                    None => None,
+                },
                 _ => None,
             }
         };
         match (fam, idx) {
             (6, 0x53) => {
-                // kParamType == "kPlate" gate, then kParamPreDelay
+                // kParamType == "kPlate" gate, then kParamPreDelay; the
+                // generic kParamDelay write is zeroed (plate has no delay)
                 if get_cell_type(self).as_deref() != Some("kPlate") {
                     return;
                 }
@@ -177,10 +182,9 @@ impl Ctx<'_> {
                 if let Val::Array(a) = arr
                     && a.len() > cell
                 {
-                    a[cell]
-                        .obj_at(submap)
-                        .obj_at("plainParams")
-                        .set("kParamPreDelay", value);
+                    let p = a[cell].obj_at(submap).obj_at("plainParams");
+                    p.set("kParamPreDelay", value);
+                    p.set("kParamDelay", Val::F64(0.0));
                 }
             }
             (0, 0x63) => {

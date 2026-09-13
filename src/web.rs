@@ -10,8 +10,11 @@
 //!   preset via [`FlpDoc::build_fxp`] without re-scanning the document.
 //! - [`convert_flp`]: rewrite every Serum synth instance in place as a
 //!   Serum2 instance and return the converted FLP bytes plus a report.
+//! - [`convert_flp_selected`]: same, but only for the instances selected
+//!   by preset-table row index; unselected instances stay byte-identical
+//!   (plain `.flp` inputs only — see the function docs).
 //!
-//! All three accept a plain `.flp` or a zipped loop package (`PK`-prefixed
+//! All of these accept a plain `.flp` or a zipped loop package (`PK`-prefixed
 //! ZIP, unpacked in memory via [`crate::zip`]; every `*.flp` member is
 //! processed, never recursing into zip-in-zip).
 //!
@@ -503,14 +506,52 @@ fn tag_doc(doc: &core::FlpInput, msg: String) -> String {
 /// instance stays unconverted, the reason lands in `warnings_json`).
 #[wasm_bindgen]
 pub fn convert_flp(data: &[u8]) -> Result<ConvertReport, JsValue> {
+    convert_impl(data, None)
+}
+
+/// Convert only the selected Serum instances of an FLP (see
+/// [`ConvertReport`]).
+///
+/// `indices` are scan-order instance indices — the same numbers the web UI
+/// shows as the preset table's row (`WasmPreset::index`), not conversion
+/// plan positions (Serum FX rows exist in the table but are never planned;
+/// see [`flpconv::InstancePlan::instance_index`]). Every instance that is
+/// not selected stays byte-identical and is reported in `warnings_json`,
+/// as is a selected index with no convertible Serum synth behind it (a
+/// Serum FX row or an out-of-range index). An empty selection converts
+/// every instance, matching [`convert_flp`].
+///
+/// Selection is restricted to plain `.flp` inputs: for a zipped loop
+/// package the preset table's row numbers are global across members while
+/// conversion plans are per document, so a selection cannot be mapped
+/// unambiguously — archives are therefore always converted whole (the
+/// request errors, letting the UI fall back to [`convert_flp`]).
+#[wasm_bindgen]
+pub fn convert_flp_selected(data: &[u8], indices: Vec<u32>) -> Result<ConvertReport, JsValue> {
+    if indices.is_empty() {
+        return convert_flp(data);
+    }
+    convert_impl(data, Some(&indices))
+}
+
+/// Shared orchestration for [`convert_flp`] and [`convert_flp_selected`];
+/// `rows` narrows the conversion to the selected preset-table rows
+/// (`None` = convert every plan; `Some` is only accepted for plain `.flp`
+/// inputs, see [`convert_flp_selected`]).
+fn convert_impl(data: &[u8], rows: Option<&[u32]>) -> Result<ConvertReport, JsValue> {
     let docs = core::flp_inputs("", data).map_err(|e| JsValue::from_str(&e))?;
+    if rows.is_some() && docs.iter().any(|d| d.from_archive) {
+        return Err(JsValue::from_str(
+            "row selection is only available for a plain .flp input; a zipped loop package is always converted as a whole",
+        ));
+    }
     let mut converted_docs: Vec<ConvertedDoc> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut details: Vec<String> = Vec::new();
     let mut converted_count = 0u32;
 
     for doc in &docs {
-        let (plans, doc_warnings) = match flpconv::scan_convertible_detailed(&doc.data) {
+        let (all_plans, doc_warnings) = match flpconv::scan_convertible_detailed(&doc.data) {
             Ok(v) => v,
             Err(e) => {
                 if doc.from_archive {
@@ -518,6 +559,26 @@ pub fn convert_flp(data: &[u8]) -> Result<ConvertReport, JsValue> {
                     continue;
                 }
                 return Err(JsValue::from_str(&e));
+            }
+        };
+
+        // Resolve the selection to the plans to rewrite. `apply` only
+        // touches plans in this list, so unselected instances stay
+        // byte-identical.
+        let plans: Vec<flpconv::InstancePlan> = match rows {
+            None => all_plans,
+            Some(indices) => {
+                let (positions, skipped) = flpconv::filter_plans_by_rows(&all_plans, indices);
+                warnings.extend(skipped);
+                let mut kept = Vec::with_capacity(positions.len());
+                let mut next = 0;
+                for (i, plan) in all_plans.into_iter().enumerate() {
+                    if next < positions.len() && positions[next] == i {
+                        kept.push(plan);
+                        next += 1;
+                    }
+                }
+                kept
             }
         };
 

@@ -80,7 +80,8 @@ pub(super) fn write_macro_names(ctx: &mut Ctx, ver: f32) {
     }
 }
 
-/// MIDI map (version > 0.1299).
+// MIDI map (version > 0.1299). Only the 247 CC bytes at blob+0x3840 are
+// read by the importer (0x4DFD92 loop); the 0x5360 extension is ignored.
 pub(super) fn write_midi_map(ctx: &mut Ctx, ver: f32) {
     if ver <= 0.1299 {
         return;
@@ -93,17 +94,6 @@ pub(super) fn write_midi_map(ctx: &mut Ctx, ver: f32) {
             e.set("ccNum", Val::UInt(u64::from(cc)));
             let mut ids = Val::arr();
             ids.push(Val::UInt(i as u64));
-            e.set("paramIDs", ids);
-            entries.push(e);
-        }
-    }
-    for i in 0..37usize {
-        let cc = ctx.st[s1state::OFF_MIDI_MAP_EXTRA + i];
-        if cc != 0 && cc < 128 {
-            let mut e = Val::obj();
-            e.set("ccNum", Val::UInt(u64::from(cc)));
-            let mut ids = Val::arr();
-            ids.push(Val::UInt((248 + i) as u64));
             e.set("paramIDs", ids);
             entries.push(e);
         }
@@ -133,34 +123,132 @@ pub(super) fn write_globals(ctx: &mut Ctx, ver: f32) {
         g.set("kParamPolyCount", Val::F64(f64::from(poly_n)));
     } else {
         ctx.fn_setval(0x142, 1.0);
-        ctx.fn_setval(0x154, 1.0);
+        if ver < 0.144 {
+            ctx.fn_setval(0x154, 1.0);
+        }
     }
 }
 
 /// Embedded streams / tuning / loopback64 / boundary64 writers.
 pub(super) fn write_embedded_streams(ctx: &mut Ctx) -> Result<(), String> {
+    // storedPhasePos (SubOsc4): raw 8-byte value at blob+0x5528, omitted
+    // when zero (importer 0x4F4D60). Not written for modern presets, where
+    // the same data arrives through the 0x5418 phasor-memory blocks.
+    let sub_phase = ctx.u64_at(s1state::OFF_STORED_PHASE_POS);
+    if sub_phase != 0 {
+        ctx.root
+            .obj_at("Oscillator4")
+            .obj_at("SubOsc4")
+            .set("storedPhasePos", Val::UInt(sub_phase));
+    }
+
+    // noise sample: byte count at blob+0x5544; when present, the
+    // loopback64/boundary64 words (blob+0x5530/0x5538) accompany it.
+    let noise_size = ctx.u32_at(0x5544) as usize;
+    if noise_size > 0 {
+        for (off, key) in [
+            (s1state::OFF_LOOPBACK64, "loopback64"),
+            (s1state::OFF_BOUNDARY64, "boundary64"),
+        ] {
+            let raw = ctx.u64_at(off);
+            if raw != 0 {
+                ctx.root
+                    .obj_at("Oscillator3")
+                    .obj_at("NoiseOsc3")
+                    .set(key, Val::UInt(raw));
+            }
+        }
+    }
+
+    // tuningData / embedded noise sample: the appended streams carry the
+    // wavetable frames first (byte counts at blob+0x4968/0x496C), then the
+    // tuning bytes (length at blob+0x53E0), then the noise sample (byte
+    // count at blob+0x5544). Verified on a legacy preset embedding a tuning
+    // and a noise sample in one stream (tuning text at stream offset 0).
     let tuning = ctx.preset.tuning_bytes();
-    if tuning.len >= 1 && tuning.len <= 0x8000 {
-        let mut data = Val::Bytes(Vec::new());
-        let mut left = tuning.len as usize;
+    let frames: usize = ctx
+        .preset
+        .osc_wt_frames()
+        .iter()
+        .map(|f| (*f).max(0) as usize & !3)
+        .sum();
+    let tuning_len = if tuning.len >= 1 && tuning.len <= 0x8000 {
+        tuning.len as usize
+    } else {
+        0
+    };
+    if tuning_len > 0 {
+        let mut skip = frames;
+        let mut data = Val::arr();
+        let mut left = tuning_len;
         for s in ctx.streams {
             if left == 0 {
                 break;
             }
-            let take = left.min(s.len());
-            if let Val::Bytes(b) = &mut data {
-                b.extend_from_slice(&s[..take]);
+            if skip >= s.len() {
+                skip -= s.len();
+                continue;
             }
+            let take = left.min(s.len() - skip);
+            if let Val::Array(a) = &mut data {
+                a.extend(
+                    s[skip..skip + take]
+                        .iter()
+                        .map(|b| Val::UInt(u64::from(*b))),
+                );
+            }
+            skip = 0;
             left -= take;
         }
         ctx.root.set("tuningData", data);
         ctx.root.set("tuningName", Val::Text(tuning.name));
     }
+
+    // embedded noise sample: two deinterleaved halves of f32 samples
+    if noise_size > 0 {
+        let mut skip = frames + tuning_len;
+        let mut collected: Vec<u8> = Vec::new();
+        let mut left = noise_size;
+        for s in ctx.streams {
+            if left == 0 {
+                break;
+            }
+            if skip >= s.len() {
+                skip -= s.len();
+                continue;
+            }
+            let take = left.min(s.len() - skip);
+            collected.extend_from_slice(&s[skip..skip + take]);
+            skip = 0;
+            left -= take;
+        }
+        let half = collected.len() / 2;
+        let mut arr = Val::arr();
+        for half_idx in 0..2usize {
+            let mut sub = Val::arr();
+            for chunk in collected[half_idx * half..half_idx * half + half]
+                .as_chunks::<4>()
+                .0
+            {
+                sub.push(Val::F64(f64::from(f32::from_le_bytes(*chunk))));
+            }
+            arr.push(sub);
+        }
+        let noise_name = crate::core::cstr(
+            ctx.st.as_slice(),
+            s1state::OFF_NOISE_NAME,
+            s1state::NAME_FIELD_LEN,
+            true,
+        );
+        let n3 = ctx.root.obj_at("Oscillator3").obj_at("NoiseOsc3");
+        n3.set("embeddedNoiseData", arr);
+        n3.set("pathToNoiseSample", Val::Text(noise_name));
+    }
     Ok(())
 }
 
 /// Meta keys: fileType/vendor/url/product/version/productVersion/serum1*.
-pub(super) fn write_meta(ctx: &mut Ctx) {
+pub(super) fn write_meta(ctx: &mut Ctx, ver: f32) {
     ctx.root.set("fileType", Val::Text("SerumPreset".into()));
     ctx.root.set("vendor", Val::Text("Xfer Records".into()));
     ctx.root
@@ -168,13 +256,63 @@ pub(super) fn write_meta(ctx: &mut Ctx) {
     ctx.root.set("product", Val::Text("Serum2".into()));
     ctx.root.set("productVersion", Val::Text("2.0.23".into()));
     ctx.root.set("version", Val::F32(9.0));
-    let chunk_ver = f64::from(ctx.f32_at(s1state::OFF_VERSION_F32));
-    ctx.root.set("serum1ChunkVersion", Val::F64(chunk_ver));
+    let chunk_ver = ctx.f32_at(s1state::OFF_VERSION_F32);
     ctx.root
-        .set("serum1Version", Val::F64(1.368_000_030_517_578_1));
-    // mpe fields
-    ctx.root.set("mpeEnabled", Val::Int(0));
-    ctx.root.set("mpeConfig", Val::Int(0));
-    ctx.root.set("mpeGlobalPitchBendRange", Val::Int(2));
-    ctx.root.set("mpePitchBendRange", Val::Int(48));
+        .set("serum1ChunkVersion", Val::F64(f64::from(chunk_ver)));
+    ctx.root.set(
+        "serum1Version",
+        Val::F64(f64::from(serum1_version(chunk_ver, ctx))),
+    );
+    // ---- MPE state (importer 0x4DD0D6, version > 0.155 only): mpeEnabled
+    // from the f32 at blob+0x5414, the three config values from bytes at
+    // blob+0x5415..0x5418. Older presets carry no MPE state at all. ----
+    if ver > 0.155 {
+        let mpe_enabled = ctx.f32_at(0x5414);
+        ctx.root.set("mpeEnabled", Val::Bool(mpe_enabled != 0.0));
+        ctx.root
+            .set("mpeConfig", Val::Int(i64::from(ctx.st[0x5415] as i8)));
+        ctx.root.set(
+            "mpeGlobalPitchBendRange",
+            Val::Int(i64::from(ctx.st[0x5416] as i8)),
+        );
+        ctx.root.set(
+            "mpePitchBendRange",
+            Val::Int(i64::from(ctx.st[0x5417] as i8)),
+        );
+    }
+}
+
+/// The `serum1Version` mapping chain (importer 0x4E5C42–0x4E5EEF): above
+/// 0.150 the version stored in the state itself (blob+0x5548) is used,
+/// otherwise a threshold ladder maps the chunk version onto the Serum 1.x
+/// release it corresponds to.
+fn serum1_version(v: f32, ctx: &Ctx) -> f32 {
+    if v > 0.150 {
+        return ctx.f32_at(0x5548);
+    }
+    const LADDER: [(f32, f32); 14] = [
+        (0.131, 1.010),
+        (0.133, 1.023),
+        (0.134, 1.026),
+        (0.135, 1.032),
+        (0.136, 1.036),
+        (0.137, 1.035),
+        (0.138, 1.044),
+        (0.139, 1.051),
+        (0.141, 1.068),
+        (0.142, 1.071),
+        (0.143, 1.072),
+        (0.144, 1.082),
+        (0.146, 1.092),
+        (0.147, 1.095),
+    ];
+    if v <= 0.109_999 {
+        return 1.005;
+    }
+    for (threshold, mapped) in LADDER {
+        if v < threshold {
+            return mapped;
+        }
+    }
+    if v < 0.148 { 1.103 } else { 1.105 }
 }

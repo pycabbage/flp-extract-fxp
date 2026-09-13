@@ -17,6 +17,8 @@ crate-type = ["cdylib", "rlib"]
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 md-5 = "0.10"
+# Pure-Rust zstd decoding (Serum2 XferJson frames); std-only, wasm32-safe.
+ruzstd = "0.8"
 # Structured (--json) CLI reports. Both crates compile for wasm32 too, so
 # the shared report types (src/report.rs) stay available on every target.
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +29,3 @@ zstd = "0.13"
 # never fetch or link wasm-bindgen; src/web.rs is cfg-gated identically.
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))'.dependencies]
 wasm-bindgen = "0.2"
-
-[dev-dependencies]
-ruzstd = "0.8"
