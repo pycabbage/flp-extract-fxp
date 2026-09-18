@@ -18,7 +18,7 @@ clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 md-5 = "0.10"
 # Pure-Rust zstd decoding (Serum2 XferJson frames); std-only, wasm32-safe.
-ruzstd = "0.8"
+ruzstd = "0.9"
 # Structured (--json) CLI reports. Both crates compile for wasm32 too, so
 # the shared report types (src/report.rs) stay available on every target.
 serde = { version = "1", features = ["derive"] }
