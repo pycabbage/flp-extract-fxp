@@ -13,7 +13,7 @@
     "@fontsource-variable/geist": "^5.3.0",
     "@tailwindcss/vite": "^4.3.3",
     "class-variance-authority": "^0.7.1",
-    "cn": "^0.2.6",
+    "cn": "^0.3.0",
     "fflate": "^0.8.3",
     "flp-extract-fxp": "link:../pkg",
     "lucide-react": "^1.44.0",
