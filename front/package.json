@@ -16,7 +16,7 @@
     "cn": "^0.3.0",
     "fflate": "^0.8.3",
     "flp-extract-fxp": "link:../pkg",
-    "lucide-react": "^1.44.0",
+    "lucide-react": "^1.46.0",
     "next-themes": "^0.4.6",
     "radix-ui": "^1.6.7",
     "react": "^19.2.8",
