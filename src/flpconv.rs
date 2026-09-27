@@ -1614,9 +1614,8 @@ mod tests {
                 "{json}"
             );
             let frame = &c.serum_preset[foff..];
-            assert_eq!(
+            assert!(
                 json.contains(&format!("\"hash\":\"{}\"", serum2state::md5_hex(frame))),
-                true,
                 "{json}"
             );
 

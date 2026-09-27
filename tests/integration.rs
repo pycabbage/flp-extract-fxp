@@ -1673,7 +1673,7 @@ fn extract_serum2_writes_preset() {
     let frame = &data[foff..];
     let mut h = Md5::new();
     h.update(frame);
-    let expect_hash = format!("{:x}", h.finalize());
+    let expect_hash = hex_lower(&h.finalize());
     assert!(
         json.contains(&format!("\"hash\":\"{expect_hash}\"")),
         "hash mismatch: {json}"
@@ -1783,8 +1783,17 @@ fn corpus_preset_round_trip() {
         // The rebuilt container's hash matches its own frame.
         let mut h = Md5::new();
         h.update(&rebuilt[foff2..]);
-        assert!(json2.contains(&format!("\"hash\":\"{:x}\"", h.finalize())));
+        assert!(json2.contains(&format!("\"hash\":\"{}\"", hex_lower(&h.finalize()))));
     }
+}
+
+/// Lowercase hex of a digest (md-5 0.11's output type has no `LowerHex`).
+fn hex_lower(digest: &[u8]) -> String {
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 /// Collect `**/*.SerumPreset` below `dir` without external crates.
