@@ -8,6 +8,7 @@ FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum
 - `convert`: FLP 内の Serum インスタンスを変換済み Serum2 インスタンスに書き換えた FLP を生成 (下記参照)
 - `convert-fxp`: 単体の Serum .fxp プリセットを Serum2 の .SerumPreset ファイルへ変換 (実験的、下記参照)
 - `patch`: fxp (または FLP 内の全 Serum インスタンス) のプリセット名 / 作者 / カテゴリを書き換え (下記参照)
+- FL Studio の **Patcher** ノード内にホストされた Serum / Serum2 も `list` / `extract` / `convert` / `patch` の対象 (下記参照)
 
 ## ビルド
 
@@ -74,6 +75,17 @@ FLP 内の Serum (シンセ) インスタンスごとにプリセット状態を
 再生には実際の Serum2 (VST3) のインストールが必要です。Web UI にも同じ変換があり、「Convert to Serum2」ボタンでブラウザ内で変換し `<名前>-serum2.flp` としてダウンロードできます。パイプラインと検証方法の詳細は [docs/flp-conversion.md](docs/flp-conversion.md) を参照してください。
 
 `extract` / `convert` は ZIP 連結 FLP (先頭が `PK` の "zipped loop package") も受け付けます。中の `*.flp` メンバーごとに 1 ドキュメントとして処理し、`convert` はメンバーごとに `<入力名>_<メンバー名>_serum2.flp` を出力します (`--out` は単一ドキュメント入力のときのみ指定可)。
+
+### Patcher 内のインスタンス
+
+FL Studio の Patcher は、それ自体が 1 つのプラグインで、ホストしているプラグインの状態を Patcher の状態の中に (ノードごとに) 保存します。以前はこの内側が見えなかったため、Patcher 内の Serum / Serum2 は `list` / `extract` / `convert` / `patch` のすべてで無視されていました。現在はすべてのサブコマンドが Patcher ノード内のインスタンスも扱い、場所は `<チャンネル名または FX スロット名> > <ノードラベル>` (例: `Intro Chord Patch > Serum 2 #4`) と表示されます。
+
+- `list` / `extract`: Patcher 内の Serum プリセットと Serum2 インスタンスも一覧・抽出されます (`extract --serum2` は Patcher 内の Serum2 も `.SerumPreset` として出力)
+- `convert`: Patcher 内の Serum (シンセ) は、そのノードのプラグイン状態 (ノード内レコード 5005) だけが Serum2 の状態に置き換わり、ノードの表示名が `Serum 2` になります。ノードのラベル・ポート・ワイヤ・他のノードはバイト単位でそのままです
+- `patch`: Patcher 内の Serum のプリセットメタデータも同様にその場で書き換えます
+- Patcher 内の Serum FX は通常スロットと同じく変換されず、警告のみ報告します
+
+**検証状況 (正直に)**: 手元の実プロジェクト (FL Studio 26.1.6.5639) は Patcher 内に Serum**2** を持つもので、`list` / `extract --serum2` が Patcher 内 4 つを含む 7 インスタンスを検出し、Patcher の書き換え (no-op) がバイト一致することは確認しました。しかし **Serum 1 を Patcher 内に持つ実プロジェクトは存在せず**、Serum → Serum2 の `convert` は Patcher 内では構造的な検証 (実 Serum2 ノードへ合成 Serum 状態を移植して変換) のみです。変換した Patcher を FL Studio で開く検証は行っていません。詳細は [docs/flp-patcher.md](docs/flp-patcher.md) を参照してください。
 
 ### 入力の指定 (ディレクトリ / glob)
 
@@ -170,6 +182,8 @@ cid = 3 のペイロード (Serum の場合) は fxp の `chunk` 領域そのも
 
 Serum2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外です。
 
+Patcher はバージョン 4 のイベント 213 で、ペイロードは `u32 バージョン = 4` + `[u32 cid][u64 サイズ][データ]` 列です (先頭レコードは cid 1000)。外側の cid = 0 のレコードは「ノード」というコンテナで、その中身も同じ形式のレコード列です。プラグインをホストするノードは、内側のレコード **5005** にそのプラグインの保存状態を持ち、これは通常のイベント 213 のペイロードとバイト単位で同一の構造 (version 12 + cid 1/2/30/32/50/52/54/55/56/53) です。そのため既存の Serum 判定・チャンク復元・Serum2 書き換えをそのまま適用できます (`src/patcher.rs`、詳細は [docs/flp-patcher.md](docs/flp-patcher.md))。1002 / 1004 / 1500 / 1600 / 5007 レコードの意味は不明で、ツールは解釈せずそのままコピーします。
+
 ### Serum fxp 形式 (60 バイトヘッダ、マルチバイトはビッグエンディアン)
 
 | オフセット | サイズ | フィールド | 値 |
@@ -208,6 +222,7 @@ Serum2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外で�
 - **VST2 / VstW はベストエフォート**: VST2 ラッパー (`VstW`) 内の `CcnK` プリセットは探索して復元しますが、全レイアウトは検証していません
 - **Serum2 インスタンスは抽出しない**: 件数の報告のみ行います (Serum2 は XferJson 状態を使うため対象外)
 - **`convert` の制限**: 新形式の Serum プリセット (172,736 バイト状態) のみ変換。旧形式 (2015 年頃) のプリセットは変換せず報告、Serum FX インスタンスは対象外。詳細は [docs/flp-conversion.md](docs/flp-conversion.md)
+- **Patcher 内のインスタンスは構造的な検証のみ**: Serum 1 を Patcher 内に持つ実プロジェクトでの検証と、変換後の Patcher の FL Studio での読み込み検証は未実施です。ネスト Patcher (Patcher in Patcher) は実物を確認しておらず、確認した FL Studio は 26.1.6.5639 のみです。Serum のパラメータを指すオートメーション / Patcher のコントロールサーフェスのリンクは再マップされず、ノードのラベルも変更されません。詳細は [docs/flp-patcher.md](docs/flp-patcher.md)
 
 ## テスト
 
@@ -218,3 +233,5 @@ cargo test
 ユニットテスト (FLP パーサ / 状態解析 / fxp 構築・検証) に加え、合成 FLP からの `extract` → `validate` を実行する統合テスト (`tests/integration.rs`) と、実フィクスチャ fxp の検証テストを含みます。
 
 `convert` は 5 プリセット分の golden 変換状態 (`tests/fixtures/golden_s2/`、実インポータが生成したもの) とのバイト一致テストと、実プロジェクト (`tests/fixtures/serina1.flp`) を変換した FLP の再スキャン / 差分テストで検証します。
+
+Patcher 対応は、実プロジェクトから複製した小さなレコードで組み立てた合成 Patcher (`src/testutil.rs` / `tests/integration.rs`) に対するユニットテストと CLI 統合テスト (`list` / `extract` / `validate` / `convert` / `patch`、no-op の書き換えがバイト一致であること、サイズの再計算、不正・競合する編集、古い計画の拒否) で検証します。加えて実プロジェクト (`tests/fixtures/patcher_serum2.flp`、Patcher 内の Serum2 を含む) を使うテストがあり、Serum2 の 7 インスタンス検出・実 Patcher の書き換えのバイト一致・実 Serum2 ノードへ合成 Serum 状態を移植して `convert` するテストを実行します。これらのフィクスチャは追跡対象外で、ファイルが無い場合は黙ってスキップされます。

@@ -2,7 +2,8 @@
 //!
 //! [`scan_serum_instances`] walks the FLP event stream once and collects
 //! every usable Serum plugin instance (see [`Instance`]) together with
-//! diagnostic counters ([`ScanStats`]). Everything in this module is
+//! diagnostic counters ([`ScanStats`]); plugins hosted inside FL Studio
+//! Patchers are found too (see [`crate::patcher`]). Everything in this module is
 //! IO-free and platform-independent, so it behaves identically on native
 //! targets and on `wasm32-unknown-unknown`.
 
@@ -12,6 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::flp;
+use crate::patcher;
 use crate::serum;
 use crate::serum2state;
 use crate::zip;
@@ -91,7 +93,10 @@ pub struct ScanStats {
 pub struct Instance {
     /// Numeric FL Studio channel the plugin was inserted on, if known.
     pub channel: Option<u16>,
-    /// Channel name, falling back to the FX track name.
+    /// Channel name, falling back to the FX track name. For a plugin hosted
+    /// inside an FL Studio Patcher the Patcher node label is appended:
+    /// `<channel or FX slot name> > <node label>`
+    /// (e.g. `Intro Chord Patch > Serum 2 #4`, see [`crate::patcher`]).
     pub channel_name: String,
     /// Plugin display name as stored in the FLP.
     pub plugin_name: String,
@@ -106,7 +111,9 @@ pub struct Instance {
 pub struct Serum2Instance {
     /// Numeric FL Studio channel the plugin was inserted on, if known.
     pub channel: Option<u16>,
-    /// Channel name, falling back to the FX track name.
+    /// Channel name, falling back to the FX track name; Patcher-hosted
+    /// instances append the node label (`<channel> > <node label>`, same
+    /// format as [`Instance::channel_name`]).
     pub channel_name: String,
     /// Plugin display name as stored in the FLP.
     pub plugin_name: String,
@@ -150,35 +157,35 @@ pub fn scan_serum_instances(buf: &[u8]) -> Result<(Vec<Instance>, ScanStats), St
                 cur_fx_name = text(ev.data);
             }
             flp::EV_PLUGIN_PARAMS => {
-                let Ok(pp) = flp::parse_plugin_params(ev.data) else {
-                    continue;
-                };
-                if serum::is_serum2(pp.name, pp.filename) {
-                    stats.serum2_count += 1;
-                    continue;
-                }
-                if !serum::is_serum1(pp.name, pp.filename) || pp.state.is_empty() {
-                    continue;
-                }
-                match serum::serum1_chunk_from_state(pp.state) {
-                    Ok(chunk) => {
-                        let channel = cur_channel;
-                        instances.push(Instance {
-                            channel,
-                            channel_name: channel
-                                .and_then(|c| channels.get(&c).cloned())
-                                .unwrap_or_else(|| cur_fx_name.clone()),
-                            plugin_name: text(pp.name),
-                            chunk,
-                        });
+                let base = cur_channel
+                    .and_then(|c| channels.get(&c).cloned())
+                    .unwrap_or_else(|| cur_fx_name.clone());
+                for site in patcher::plugin_sites(ev.data) {
+                    let Ok(pp) = flp::parse_plugin_params(site.payload) else {
+                        continue;
+                    };
+                    if serum::is_serum2(pp.name, pp.filename) {
+                        stats.serum2_count += 1;
+                        continue;
                     }
-                    Err(e) => {
-                        let where_ = cur_channel
-                            .and_then(|c| channels.get(&c).cloned())
-                            .unwrap_or_else(|| cur_fx_name.clone());
-                        stats
-                            .failed
-                            .push(format!("skipped a Serum plugin state ({where_}): {e}"));
+                    if !serum::is_serum1(pp.name, pp.filename) || pp.state.is_empty() {
+                        continue;
+                    }
+                    let where_ = site.location(&base);
+                    match serum::serum1_chunk_from_state(pp.state) {
+                        Ok(chunk) => {
+                            instances.push(Instance {
+                                channel: cur_channel,
+                                channel_name: where_,
+                                plugin_name: text(pp.name),
+                                chunk,
+                            });
+                        }
+                        Err(e) => {
+                            stats
+                                .failed
+                                .push(format!("skipped a Serum plugin state ({where_}): {e}"));
+                        }
                     }
                 }
             }
@@ -216,33 +223,36 @@ pub fn scan_serum2_instances(buf: &[u8]) -> Result<(Vec<Serum2Instance>, Vec<Str
                 cur_fx_name = text(ev.data);
             }
             flp::EV_PLUGIN_PARAMS => {
-                let Ok(pp) = flp::parse_plugin_params(ev.data) else {
-                    continue;
-                };
-                if !serum::is_serum2(pp.name, pp.filename) || pp.state.is_empty() {
-                    continue;
-                }
-                let where_ = cur_channel
+                let base = cur_channel
                     .and_then(|c| channels.get(&c).cloned())
                     .unwrap_or_else(|| cur_fx_name.clone());
-                match serum::serum2_records_from_state(pp.state) {
-                    Some((processor, controller)) => {
-                        let meta = match serum2state::parse_xfer_json(controller) {
-                            Ok((json, ..)) => serum2state::controller_meta_from_json(&json),
-                            Err(_) => serum2state::ControllerMeta::default(),
-                        };
-                        instances.push(Serum2Instance {
-                            channel: cur_channel,
-                            channel_name: where_,
-                            plugin_name: text(pp.name),
-                            processor: processor.to_vec(),
-                            controller: controller.to_vec(),
-                            meta,
-                        });
+                for site in patcher::plugin_sites(ev.data) {
+                    let Ok(pp) = flp::parse_plugin_params(site.payload) else {
+                        continue;
+                    };
+                    if !serum::is_serum2(pp.name, pp.filename) || pp.state.is_empty() {
+                        continue;
                     }
-                    None => warnings.push(format!(
-                        "skipped a Serum2 instance ({where_}): unrecognized VST3 wrapper state"
-                    )),
+                    let where_ = site.location(&base);
+                    match serum::serum2_records_from_state(pp.state) {
+                        Some((processor, controller)) => {
+                            let meta = match serum2state::parse_xfer_json(controller) {
+                                Ok((json, ..)) => serum2state::controller_meta_from_json(&json),
+                                Err(_) => serum2state::ControllerMeta::default(),
+                            };
+                            instances.push(Serum2Instance {
+                                channel: cur_channel,
+                                channel_name: where_,
+                                plugin_name: text(pp.name),
+                                processor: processor.to_vec(),
+                                controller: controller.to_vec(),
+                                meta,
+                            });
+                        }
+                        None => warnings.push(format!(
+                            "skipped a Serum2 instance ({where_}): unrecognized VST3 wrapper state"
+                        )),
+                    }
                 }
             }
             _ => {}
@@ -425,6 +435,68 @@ mod tests {
         assert_eq!(text(&utf16), "Ab");
         assert_eq!(text(b"plain\0"), "plain");
         assert_eq!(text(b""), "");
+    }
+
+    #[test]
+    fn scans_plugins_hosted_in_a_patcher_with_node_locations() {
+        use crate::testutil::{
+            other_plugin_payload, patcher_event, patcher_plugin_node, serum1_payload,
+            serum1_payload_with, serum2_payload,
+        };
+        let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+        let ids = [0x3ec, 0x3f5, 0x3fe, 0x407];
+        let patcher = patcher_event(
+            &[
+                patcher_plugin_node(
+                    ids[0],
+                    "Serum",
+                    "Lead",
+                    &serum1_payload("Serum", "Serum.vst3"),
+                ),
+                patcher_plugin_node(
+                    ids[1],
+                    "Serum 2",
+                    "Pad",
+                    &serum2_payload("Serum 2", "Serum2.vst3"),
+                ),
+                patcher_plugin_node(
+                    ids[2],
+                    "Vital",
+                    "Other",
+                    &other_plugin_payload("Vital", "Vital.vst3"),
+                ),
+                patcher_plugin_node(
+                    ids[3],
+                    "Serum",
+                    "Broken",
+                    &serum1_payload_with("Serum", "Serum.vst3", b"not a zlib stream".to_vec()),
+                ),
+            ],
+            &ids,
+        );
+        // The Patcher sits on an FX slot (no channel context).
+        let buf = build_flp(&[
+            (flp::EV_TEXT_FX_TRACK_NAME, utf16("Insert 1")),
+            (flp::EV_PLUGIN_PARAMS, patcher),
+        ]);
+
+        let (instances, stats) = scan_serum_instances(&buf).unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].channel, None);
+        assert_eq!(instances[0].channel_name, "Insert 1 > Lead");
+        assert_eq!(instances[0].plugin_name, "Serum");
+        assert_eq!(stats.serum2_count, 1);
+        assert_eq!(stats.failed.len(), 1);
+        assert!(
+            stats.failed[0].contains("(Insert 1 > Broken)"),
+            "{:?}",
+            stats.failed
+        );
+
+        let (s2, warnings) = scan_serum2_instances(&buf).unwrap();
+        assert!(warnings.is_empty());
+        assert_eq!(s2.len(), 1);
+        assert_eq!(s2[0].channel_name, "Insert 1 > Pad");
     }
 
     #[test]

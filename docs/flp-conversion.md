@@ -29,6 +29,8 @@ hold converted Serum2 states.
 input (plain .flp, or zipped loop package → unpacked in memory       src/zip.rs,
   one document per *.flp member                        core::flp_inputs)
   → locate event 213 (PluginParams) payloads          src/flp.rs, src/flpconv.rs
+        (a Patcher event: one plugin state per hosted node    src/patcher.rs,
+         = the node's 5005 record, see flp-patcher.md)
   → inner cid-3 chunk = Serum chunk                 (zlib streams + u32 LE trailer)
   → s1state::parse_preset → 172,736 B state blob      src/s1state.rs
   → importer: port of s1state_load (RVA 0x4DABC0)     src/importer.rs
@@ -60,9 +62,15 @@ input (plain .flp, or zipped loop package → unpacked in memory       src/zip.r
 | tables | `src/s2tables.rs` — **GENERATED**, do not hand-edit | `s2-runtime-tables.md` |
 | CBOR + container | `src/s2tree.rs`, `src/serum2state.rs` | `serum2-state-format.md` |
 | FLP rewrite | `src/flpconv.rs::apply` | `flp-serum2-conversion.md` §6 |
+| Patcher-hosted plugins | `src/patcher.rs` (`plugin_sites`, `rewrite`) | `flp-patcher.md` |
 
 Notes:
 
+- Serum instances hosted inside an FL Studio **Patcher** are planned and
+  converted too: the node's 5005 record holds a plain event-213 payload, so the
+  same recipe runs on it and only that node's 5005 (and its display name 5008,
+  set to `Serum 2`) changes. Reported as `<channel> > <node label>`. Verified
+  structurally only — see `flp-patcher.md` §6 and limitation (f) below.
 - `src/importer.rs` implements both the synth path (`flag = 0`, what FLP
   conversion wires) and the FX build (`flag = 1`, drops the oscillator WTOsc
   nodes) — the latter was used during RE calibration; FLP conversion itself
@@ -88,6 +96,7 @@ silently when absent, so a fresh clone builds and tests green.
 | `tests/fixtures/serina1.flp` | the sample FL Studio project (5 Serum + 1 Serum2) | copy from the local sample library (`assets/`, untracked) |
 | `tests/fixtures/golden_s2/0N_processor_state.bin` | converted processor records produced by the REAL importer | call `s1state_load` at runtime per `docs/s2-runtime-tables.md` (harness method), wrap with `serum2state::build_processor_record`-equivalent container rules |
 | `tests/fixtures/extracted_serum1.fxp` | extraction-feature fixture | `flp-extract-fxp extract` on the sample project, keep preset 01 |
+| `tests/fixtures/patcher_serum2.flp` | real FL Studio 26.1.6.5639 project with 7 Serum 2 instances, 4 of them inside two Patchers (`real_patcher_*` tests) | copy of the user's own project; no Serum 1 inside a Patcher exists, so a Serum payload is transplanted by the test (see `flp-patcher.md` §5) |
 | `tests/fixtures/legacy/*.fxp` + `*_importer_tree.cbor` | 6 legacy (2015-era) presets and the REAL importer's converted trees for them | call `s1state_load` on each raw fxp chunk (ctypes harness, §Verification), dump the walked tree as canonical CBOR (`*_importer_tree.cbor`) |
 | `docs/data/*.json` | runtime-dumped descriptor / remap / defaults tables | dump per `docs/s2-runtime-tables.md` (LoadLibraryW + InitDll + memory reads) |
 | `C:\Users\cabbage\Documents\Xfer\Serum 2 Presets\Presets\Factory\**\*.SerumPreset` | the 626 real Serum2 factory presets (read-only, never copied into the repo) | shipped with any Serum2 install; the `corpus_preset_round_trip` test reads 5 of them only when `FLPX_S2_CORPUS_DIR` points there |
@@ -262,6 +271,14 @@ warnings/output):
   more nondeterministic than this (double-vs-f32 re-emission between
   sessions), so this is cosmetic. CLI and wasm outputs are otherwise
   byte-identical.
+- **(f) Patcher-hosted instances are structurally verified only**: Serum
+  inside an FL Studio Patcher node is converted / patched by replacing the
+  node's 5005 state (see `flp-patcher.md`), but no real project with Serum 1
+  inside a Patcher was available (the sample hosts Serum 2) and no converted
+  Patcher was loaded in FL Studio. Automation / Patcher control-surface links
+  to Serum parameters are not remapped, the node label is kept, nested
+  Patchers were never observed, and Serum FX inside a Patcher is left
+  untouched.
 - **(d) Wavetable data is embedded**: the converted state references
   wavetable/noise data via embedded CBOR byte strings
   (`embeddedWTData`/`embeddedNoiseData`), exactly like the real importer — no
