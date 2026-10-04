@@ -14,6 +14,8 @@ calibration are not in the repo; numbers here are transcribed from those dumps.
 Related docs: `serum-fxp-format.md` (Serum fxp), `serum2-importer-analysis.md`
 (importer validation), `serum2-dynamic-verification.md` (live VST3 probes).
 
+Plugins inside an FL Studio Patcher keep this same payload layout in the node's 5005 record: see `flp-patcher.md`.
+
 ## 1. Container recap
 
 - File = `FLhd` + u32 LE length + payload, then `FLdt` + u32 LE length + event

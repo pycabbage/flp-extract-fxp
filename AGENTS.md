@@ -8,6 +8,7 @@ One Cargo crate (`flp-extract-fxp`) that is simultaneously:
   that powers the React frontend in `front/` (deployed to GitHub Pages).
 
 Both surfaces share the same core logic in `src/core.rs`, `src/flp.rs`,
+`src/patcher.rs` (plugin states hosted inside FL Studio Patchers),
 `src/serum.rs`, `src/fxp.rs`, plus the Serum → Serum2 conversion stack:
 `src/s1state.rs` (Serum state parser), `src/importer.rs` (faithful port of
 Serum2.vst3's `s1state_load`), `src/s2tree.rs` + `src/serum2state.rs`
@@ -105,8 +106,8 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 
 Before touching FLP/Serum parsing, `.fxp` construction, or the conversion
 stack (`src/flp.rs`, `src/serum.rs`, `src/fxp.rs`, `src/s1state.rs`,
-`src/importer.rs`, `src/s2tree.rs`, `src/serum2state.rs`, `src/flpconv.rs`),
-read the relevant doc — they are the verified source of truth (static
+`src/importer.rs`, `src/s2tree.rs`, `src/serum2state.rs`, `src/flpconv.rs`,
+`src/patcher.rs`), read the relevant doc — they are the verified source of truth (static
 reverse-engineering + real-file calibration + dynamic Serum2 verification),
 not just design notes:
 - `docs/serum-fxp-format.md` — byte-level Serum `.fxp` spec.
@@ -118,6 +119,9 @@ not just design notes:
   vs Serum2 instances (the rewrite recipe).
 - `docs/flp-conversion.md` — the shipped FLP conversion feature (pipeline,
   surfaces, verification, limitations).
+- `docs/flp-patcher.md` — plugins hosted inside FL Studio Patcher nodes
+  (record layout, why the 5005 payload equals a plain event-213 payload, what
+  is and is NOT verified).
 - `docs/serum2-dynamic-verification.md` — live VST3-host verification. Read
   the CORRECTION section at the top first: `setState` **rejects** Serum
   data (the old "dynamically verified acceptance" conclusion was a false
@@ -134,6 +138,17 @@ docs above):
   0x4972, version f32 0x4994, author 0x49A0, category 0x49D0).
 - Serum2 plugin instances are intentionally never extracted (they use an
   `XferJson`-prefixed state, not the Serum chunk layout) — only counted.
+- **Every event-213 scanner must iterate `patcher::plugin_sites(ev.data)`**
+  instead of reading `ev.data` directly (`core::scan_serum_instances`,
+  `core::scan_serum2_instances`, `flpconv::scan_convertible_detailed`,
+  `flpconv::patch_serum_metadata`). A Patcher's own payload has version 4 and
+  parses as an anonymous bare blob, so a scanner that skips `plugin_sites`
+  silently misses every plugin hosted in a Patcher. Row numbering
+  (`InstancePlan::instance_index` vs the core scan rows) must stay consistent
+  between the scanners, and replacements of hosted plugins go through
+  `patcher::rewrite` (via `InstancePlan::node_path`), never a whole-event
+  splice. Patcher support is verified structurally only (no real Serum 1
+  inside a Patcher, no FL Studio load test; see `docs/flp-patcher.md` §6).
 - Zipped loop packages (`PK`-prefixed ZIP exports) are unpacked in memory by
   `src/zip.rs` (minimal ZIP reader: store + deflate entries via flate2;
   encrypted and Zip64 archives are rejected with explicit errors; 256 MiB
@@ -172,6 +187,10 @@ CI) passes `cargo test` without them:
 - `tests/fixtures/serina1/*.fxp` (5 real Serum presets) and
   `tests/fixtures/serina1.flp` (real project: 5 Serum + 1 Serum2 instance)
   drive the converter tests.
+- `tests/fixtures/patcher_serum2.flp` (real FL Studio 26.1.6.5639 project, 7
+  Serum 2 instances of which 4 sit inside two Patchers; gitignored) drives the
+  `real_patcher_*` integration tests (instance count, byte-identical no-op
+  Patcher rewrites, transplanted-Serum convert).
 - `tests/fixtures/golden_s2/0N_processor_state.bin` — golden converted
   processor states produced by the REAL importer (called at runtime) and
   accepted by the real plugin — ground truth for `golden_byte_identical_*`;
