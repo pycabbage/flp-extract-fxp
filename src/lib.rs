@@ -8,6 +8,10 @@
 //! Module map:
 //! - [`flp`]: minimal FLP event-stream parser (`parse_events`,
 //!   `parse_event_spans`, `[u32 cid][u64 size][data]` record walking).
+//! - [`patcher`]: FL Studio Patcher support — enumerates the plugin states
+//!   hosted inside a Patcher event-213 payload and rewrites chosen nodes
+//!   (`plugin_sites`, `site_payload`, `rewrite`). Every event-213 scanner
+//!   iterates `plugin_sites` instead of the raw event payload.
 //! - [`serum`]: Serum / Serum2 detection and preset-chunk recovery.
 //! - [`fxp`]: `.fxp` assembly and Serum2 import-rule validation.
 //! - [`core`]: reusable "scan an FLP for Serum instances" logic plus
@@ -40,6 +44,7 @@ pub mod core;
 pub mod flp;
 pub mod flpconv;
 pub mod fxp;
+pub mod patcher;
 pub mod report;
 pub mod serum;
 pub mod zip;

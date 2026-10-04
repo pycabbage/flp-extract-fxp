@@ -12,6 +12,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::flp;
+use crate::patcher;
 use crate::serum;
 use crate::serum2state;
 use crate::zip;
@@ -91,7 +92,10 @@ pub struct ScanStats {
 pub struct Instance {
     /// Numeric FL Studio channel the plugin was inserted on, if known.
     pub channel: Option<u16>,
-    /// Channel name, falling back to the FX track name.
+    /// Channel name, falling back to the FX track name. For an instance
+    /// hosted inside an FL Studio Patcher the Patcher node label is
+    /// appended: `<channel or FX slot name> > <node label>` (e.g.
+    /// `Intro Chord Patch > Serum 2 #4`, see [`crate::patcher`]).
     pub channel_name: String,
     /// Plugin display name as stored in the FLP.
     pub plugin_name: String,
@@ -106,7 +110,9 @@ pub struct Instance {
 pub struct Serum2Instance {
     /// Numeric FL Studio channel the plugin was inserted on, if known.
     pub channel: Option<u16>,
-    /// Channel name, falling back to the FX track name.
+    /// Channel name, falling back to the FX track name; for an instance
+    /// inside a Patcher: `<channel or FX slot name> > <node label>` (see
+    /// [`Instance::channel_name`]).
     pub channel_name: String,
     /// Plugin display name as stored in the FLP.
     pub plugin_name: String,
@@ -150,35 +156,35 @@ pub fn scan_serum_instances(buf: &[u8]) -> Result<(Vec<Instance>, ScanStats), St
                 cur_fx_name = text(ev.data);
             }
             flp::EV_PLUGIN_PARAMS => {
-                let Ok(pp) = flp::parse_plugin_params(ev.data) else {
-                    continue;
-                };
-                if serum::is_serum2(pp.name, pp.filename) {
-                    stats.serum2_count += 1;
-                    continue;
-                }
-                if !serum::is_serum1(pp.name, pp.filename) || pp.state.is_empty() {
-                    continue;
-                }
-                match serum::serum1_chunk_from_state(pp.state) {
-                    Ok(chunk) => {
-                        let channel = cur_channel;
-                        instances.push(Instance {
-                            channel,
-                            channel_name: channel
-                                .and_then(|c| channels.get(&c).cloned())
-                                .unwrap_or_else(|| cur_fx_name.clone()),
-                            plugin_name: text(pp.name),
-                            chunk,
-                        });
+                let base = cur_channel
+                    .and_then(|c| channels.get(&c).cloned())
+                    .unwrap_or_else(|| cur_fx_name.clone());
+                for site in patcher::plugin_sites(ev.data) {
+                    let Ok(pp) = flp::parse_plugin_params(site.payload) else {
+                        continue;
+                    };
+                    if serum::is_serum2(pp.name, pp.filename) {
+                        stats.serum2_count += 1;
+                        continue;
                     }
-                    Err(e) => {
-                        let where_ = cur_channel
-                            .and_then(|c| channels.get(&c).cloned())
-                            .unwrap_or_else(|| cur_fx_name.clone());
-                        stats
-                            .failed
-                            .push(format!("skipped a Serum plugin state ({where_}): {e}"));
+                    if !serum::is_serum1(pp.name, pp.filename) || pp.state.is_empty() {
+                        continue;
+                    }
+                    let where_ = site.location(&base);
+                    match serum::serum1_chunk_from_state(pp.state) {
+                        Ok(chunk) => {
+                            instances.push(Instance {
+                                channel: cur_channel,
+                                channel_name: where_,
+                                plugin_name: text(pp.name),
+                                chunk,
+                            });
+                        }
+                        Err(e) => {
+                            stats
+                                .failed
+                                .push(format!("skipped a Serum plugin state ({where_}): {e}"));
+                        }
                     }
                 }
             }
@@ -216,33 +222,36 @@ pub fn scan_serum2_instances(buf: &[u8]) -> Result<(Vec<Serum2Instance>, Vec<Str
                 cur_fx_name = text(ev.data);
             }
             flp::EV_PLUGIN_PARAMS => {
-                let Ok(pp) = flp::parse_plugin_params(ev.data) else {
-                    continue;
-                };
-                if !serum::is_serum2(pp.name, pp.filename) || pp.state.is_empty() {
-                    continue;
-                }
-                let where_ = cur_channel
+                let base = cur_channel
                     .and_then(|c| channels.get(&c).cloned())
                     .unwrap_or_else(|| cur_fx_name.clone());
-                match serum::serum2_records_from_state(pp.state) {
-                    Some((processor, controller)) => {
-                        let meta = match serum2state::parse_xfer_json(controller) {
-                            Ok((json, ..)) => serum2state::controller_meta_from_json(&json),
-                            Err(_) => serum2state::ControllerMeta::default(),
-                        };
-                        instances.push(Serum2Instance {
-                            channel: cur_channel,
-                            channel_name: where_,
-                            plugin_name: text(pp.name),
-                            processor: processor.to_vec(),
-                            controller: controller.to_vec(),
-                            meta,
-                        });
+                for site in patcher::plugin_sites(ev.data) {
+                    let Ok(pp) = flp::parse_plugin_params(site.payload) else {
+                        continue;
+                    };
+                    if !serum::is_serum2(pp.name, pp.filename) || pp.state.is_empty() {
+                        continue;
                     }
-                    None => warnings.push(format!(
-                        "skipped a Serum2 instance ({where_}): unrecognized VST3 wrapper state"
-                    )),
+                    let where_ = site.location(&base);
+                    match serum::serum2_records_from_state(pp.state) {
+                        Some((processor, controller)) => {
+                            let meta = match serum2state::parse_xfer_json(controller) {
+                                Ok((json, ..)) => serum2state::controller_meta_from_json(&json),
+                                Err(_) => serum2state::ControllerMeta::default(),
+                            };
+                            instances.push(Serum2Instance {
+                                channel: cur_channel,
+                                channel_name: where_,
+                                plugin_name: text(pp.name),
+                                processor: processor.to_vec(),
+                                controller: controller.to_vec(),
+                                meta,
+                            });
+                        }
+                        None => warnings.push(format!(
+                            "skipped a Serum2 instance ({where_}): unrecognized VST3 wrapper state"
+                        )),
+                    }
                 }
             }
             _ => {}

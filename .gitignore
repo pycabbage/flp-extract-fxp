@@ -39,6 +39,7 @@ target
 # docs/flp-conversion.md. The files below stay on the working machine only.
 /tests/fixtures/extracted_serum1.fxp
 /tests/fixtures/serina1.flp
+/tests/fixtures/patcher_serum2.flp
 /tests/fixtures/serina1/
 /tests/fixtures/golden_s2/
 /docs/data/*.json

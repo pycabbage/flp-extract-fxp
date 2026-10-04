@@ -8,11 +8,12 @@
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use flp_extract_fxp::core::scan_serum_instances;
+use flp_extract_fxp::core::{scan_serum_instances, scan_serum2_instances};
 use flp_extract_fxp::flp;
 use flp_extract_fxp::flpconv::{
     BundleSource, InstancePlan, RealSource, filter_plans_by_rows, scan_convertible_detailed,
 };
+use flp_extract_fxp::patcher::{self, NodeEdit};
 use flp_extract_fxp::{s2tree, serum2state};
 use md5::{Digest, Md5};
 use serde_json::Value;
@@ -1814,4 +1815,588 @@ fn globwalk_serum_presets(dir: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Plugins hosted inside FL Studio Patchers (docs/flp-patcher.md)
+// ---------------------------------------------------------------------------
+//
+// The record bytes below are COPIED from a real Patcher event (FL Studio
+// 26.1.6.5639). The 1004 record (324 B) is stored without its zero tail.
+
+const P_1000: &str = "fe030000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+const P_1002: &str =
+    "00000000000000000000000000000000000f000000b76d2b42b76d2f43dbb60944b76d2f4300000000000000";
+const P_1004_HEAD: &str = "01000000af07723f1815fe3f00000000000000009701000085010000b00000004000000002000000030000000100000004000000000000000000000000000000";
+const P_CONTROL_SURFACE: &str = "88130000280000000000000002000000ea03000000000000090000000000000001000000000000000000000000000000000000008c1300001e0000000000000043006f006e00740072006f006c0020005300750072006600610063006500901300001e0000000000000043006f006e00740072006f006c0020005300750072006600610063006500921300000e0000000000000053007500720066006100630065008d130000740000000000000001000000d0070000400000000000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d207000008000000000000001c020000c6010000d30700000400000000000000020000008f13000028000000000000000000803fffffffff0000000000000000ffffff7f3c00000000000000000000000000000000000000911300001c000000000000000100000000000000eb03000000000000020000000000000000000000891300000000000000000000";
+const P_NOTES: &str = "780500001c00000000000000e903000000000000010000000700000000ffffffff000000000000007a0500000a000000000000004e006f00740065007300790500000000000000000000";
+const P_AUDIO_OUT: &str = "780500001c00000000000000e80300000000000000000000060000000200000000000000000000007a050000180000000000000041007500640069006f0020006f0075007400700075007400790500000000000000000000";
+const P_WIRE: &str = "140500002000000000000000f303000000000000e9030000000000000000803f020000000100000000000000150500000000000000000000";
+const P_1500: &str =
+    "0000803f00000000000000001a040000360300000000000000000000000000000000000000000000";
+const P_5007: &str =
+    "0000803fffffffff0000000000000000ffffff7f3c00000000000000000000000000000000000000";
+const P_1600: &str = "ea03000000000000254992426edb06420000000000000000";
+
+fn hex_bytes(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+fn utf16_bytes(s: &str) -> Vec<u8> {
+    s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+/// A plugin node container (outer cid 0) shaped like the sample's nodes.
+fn patcher_node(id: u32, plugin_name: &str, label: &str, state: &[u8]) -> Vec<u8> {
+    let mut header = Vec::new();
+    for v in [3u32, id, 0, 8, 2, 6, 1199, 382, 0, 0] {
+        header.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut inner = Vec::new();
+    inner.extend_from_slice(&top_rec(5000, &header));
+    inner.extend_from_slice(&top_rec(5004, &utf16_bytes("Fruity Wrapper")));
+    inner.extend_from_slice(&top_rec(5008, &utf16_bytes(plugin_name)));
+    inner.extend_from_slice(&top_rec(5010, &utf16_bytes(label)));
+    inner.extend_from_slice(&top_rec(5005, state));
+    inner.extend_from_slice(&top_rec(5007, &hex_bytes(P_5007)));
+    for (a, b, off, c) in [
+        (0u32, 0u32, 1u32, 3u32),
+        (1, 0, 7, 3),
+        (0, 0, 2, 2),
+        (0, 1, 3, 0),
+        (0, 2, 4, 0),
+        (0, 3, 5, 0),
+        (0, 4, 6, 0),
+        (1, 0, 8, 2),
+    ] {
+        let mut port = Vec::new();
+        for v in [a, b, id + off, 0, c, 0, 0] {
+            port.extend_from_slice(&v.to_le_bytes());
+        }
+        inner.extend_from_slice(&top_rec(5009, &port));
+    }
+    inner.extend_from_slice(&top_rec(5001, &[]));
+    top_rec(0, &inner)
+}
+
+/// Patcher event-213 payload around `(plugin name, label, state)` nodes.
+fn patcher_payload(nodes: &[(&str, &str, Vec<u8>)]) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&4u32.to_le_bytes());
+    p.extend_from_slice(&top_rec(1000, &hex_bytes(P_1000)));
+    p.extend_from_slice(&top_rec(1002, &hex_bytes(P_1002)));
+    let mut r1004 = hex_bytes(P_1004_HEAD);
+    r1004.resize(324, 0);
+    p.extend_from_slice(&top_rec(1004, &r1004));
+    p.extend_from_slice(&top_rec(0, &hex_bytes(P_CONTROL_SURFACE)));
+    for (i, (name, label, state)) in nodes.iter().enumerate() {
+        p.extend_from_slice(&patcher_node(0x3ec + 9 * i as u32, name, label, state));
+    }
+    p.extend_from_slice(&top_rec(0, &hex_bytes(P_NOTES)));
+    p.extend_from_slice(&top_rec(0, &hex_bytes(P_AUDIO_OUT)));
+    for _ in nodes {
+        p.extend_from_slice(&top_rec(0, &hex_bytes(P_WIRE)));
+    }
+    p.extend_from_slice(&top_rec(1500, &hex_bytes(P_1500)));
+    p.extend_from_slice(&top_rec(0, &[]));
+    p.extend_from_slice(&top_rec(0, &[]));
+    for i in 0..nodes.len() {
+        let mut r = hex_bytes(P_1600);
+        r[0..4].copy_from_slice(&(0x3ec + 9 * i as u32).to_le_bytes());
+        p.extend_from_slice(&top_rec(0, &top_rec(1600, &r)));
+    }
+    p.extend_from_slice(&top_rec(1001, &[]));
+    p
+}
+
+fn utf16_event(s: &str) -> Vec<u8> {
+    utf16_bytes(s)
+}
+
+/// An unrelated hosted plugin (stands in for the sample's Vital node).
+fn vital_state() -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&12u32.to_le_bytes());
+    p.extend_from_slice(&top_rec(54, b"Vital"));
+    p.extend_from_slice(&top_rec(55, b"/VST3/Vital.vst3"));
+    p.extend_from_slice(&top_rec(53, &[7u8; 64]));
+    p
+}
+
+/// Channel `Chords` hosting a Patcher with a Serum node (`Lead`) and a
+/// Vital node, then a plain `Bass` channel, then a trailing dword event.
+fn synthetic_patcher_flp() -> Vec<u8> {
+    flp_from_events(vec![
+        (64, vec![0, 0]),
+        (203, utf16_event("Chords")),
+        (
+            213,
+            patcher_payload(&[
+                ("Serum", "Lead", synthetic_convertible_plugin_params()),
+                ("Vital", "Vital", vital_state()),
+            ]),
+        ),
+        (128, vec![1, 2, 3, 4]),
+    ])
+}
+
+/// Top-level `(cid, data range)` records of `buf[start..]` (exact walk).
+fn record_ranges(buf: &[u8], start: usize) -> Vec<(u32, std::ops::Range<usize>)> {
+    let mut it = flp::Records::new(&buf[start..]);
+    let mut out = Vec::new();
+    while let Some((cid, data)) = it.next() {
+        let end = start + it.pos();
+        out.push((cid, end - data.len()..end));
+    }
+    assert!(!it.overran() && it.pos() == buf.len() - start, "exact walk");
+    out
+}
+
+/// Replace the payload of event `index` and fix the event varint + FLdt
+/// length (an independent re-implementation of the library's splice).
+fn replace_event_payload(buf: &[u8], index: usize, new_payload: &[u8]) -> Vec<u8> {
+    let spans = flp::parse_event_spans(buf).unwrap();
+    let (off, ev) = &spans[index];
+    let end = ev.data.as_ptr() as usize - buf.as_ptr() as usize + ev.data.len();
+    let mut out = buf[..*off].to_vec();
+    out.push(ev.id);
+    out.extend_from_slice(&flp_varint(new_payload.len()));
+    out.extend_from_slice(new_payload);
+    out.extend_from_slice(&buf[end..]);
+    let hdrlen = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as usize;
+    let dt_pos = 8 + hdrlen;
+    let dtlen = (out.len() - (dt_pos + 8)) as u32;
+    out[dt_pos + 4..dt_pos + 8].copy_from_slice(&dtlen.to_le_bytes());
+    out
+}
+
+fn assert_fldt_len_ok(buf: &[u8]) {
+    let hdrlen = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as usize;
+    let dt_pos = 8 + hdrlen;
+    let dtlen = u32::from_le_bytes(buf[dt_pos + 4..dt_pos + 8].try_into().unwrap()) as usize;
+    assert_eq!(dtlen, buf.len() - (dt_pos + 8), "FLdt length field");
+}
+
+#[test]
+fn patcher_list_extract_validate() {
+    let dir = temp_dir("patcher_list");
+    let flp_path = dir.join("patcher_project.flp");
+    std::fs::write(&flp_path, synthetic_patcher_flp()).unwrap();
+    let flp_arg = flp_path.display().to_string();
+
+    let (code, stdout, stderr) = run_cli(&["list", "--json", &flp_arg]);
+    assert_eq!(code, 0, "{stderr}");
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["presetCount"], 1, "{stdout}");
+    let preset = &report["inputs"][0]["presets"][0];
+    assert_eq!(preset["channelName"], "Chords > Lead");
+    assert_eq!(preset["pluginName"], "Serum");
+    assert_eq!(preset["presetName"], "SynthTest");
+    assert_eq!(preset["valid"], true);
+
+    let out_dir = dir.join("out");
+    let out_arg = out_dir.display().to_string();
+    let (code, _, stderr) = run_cli(&["extract", "-o", &out_arg, &flp_arg]);
+    assert_eq!(code, 0, "{stderr}");
+    let fxp = out_dir.join("01_SynthTest.fxp");
+    assert!(fxp.exists(), "expected {}", fxp.display());
+    let (code, _, stderr) = run_cli(&["validate", &fxp.display().to_string()]);
+    assert_eq!(code, 0, "{stderr}");
+}
+
+#[test]
+fn patcher_convert_rewrites_only_the_serum_node() {
+    let dir = temp_dir("patcher_convert");
+    let orig = synthetic_patcher_flp();
+    let flp_path = dir.join("patcher_project.flp");
+    std::fs::write(&flp_path, &orig).unwrap();
+    let flp_arg = flp_path.display().to_string();
+
+    // Dry run reports the plan with the node location and writes nothing.
+    let (code, stdout, stderr) = run_cli(&["convert", "--dry-run", &flp_arg]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("converting 1 Serum instance(s)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Chords > Lead"), "{stdout}");
+
+    let out_path = dir.join("converted.flp");
+    let out_arg = out_path.display().to_string();
+    let (code, stdout, stderr) = run_cli(&["convert", "--out", &out_arg, &flp_arg]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("converting 1 Serum instance(s)"),
+        "{stdout}"
+    );
+    let out = std::fs::read(&out_path).unwrap();
+    assert_fldt_len_ok(&out);
+    assert!(out.len() > orig.len());
+
+    // Other events untouched, header untouched.
+    let evs_old = flp::parse_events(&orig).unwrap();
+    let evs_new = flp::parse_events(&out).unwrap();
+    assert_eq!(evs_old.len(), evs_new.len());
+    for (i, (a, b)) in evs_old.iter().zip(&evs_new).enumerate() {
+        if i != 2 {
+            assert_eq!((a.id, a.data), (b.id, b.data), "event {i}");
+        }
+    }
+
+    // Only the Serum node changed: name `Serum 2`, label kept, Vital and
+    // every non-node record verbatim.
+    let (old_p, new_p) = (evs_old[2].data, evs_new[2].data);
+    let (old_sites, new_sites) = (patcher::plugin_sites(old_p), patcher::plugin_sites(new_p));
+    assert_eq!((old_sites.len(), new_sites.len()), (2, 2));
+    assert_eq!(new_sites[0].plugin_name, "Serum 2");
+    assert_eq!(new_sites[0].label, "Lead");
+    assert_eq!(new_sites[1].plugin_name, "Vital");
+    assert_eq!(new_sites[1].payload, old_sites[1].payload);
+    let (ra, rb) = (record_ranges(old_p, 4), record_ranges(new_p, 4));
+    assert_eq!(ra.len(), rb.len());
+    for (i, (a, b)) in ra.iter().zip(&rb).enumerate() {
+        assert_eq!(a.0, b.0);
+        if i != old_sites[0].path[0] {
+            assert_eq!(old_p[a.1.clone()], new_p[b.1.clone()], "record #{i}");
+        }
+    }
+    let node_old = &old_p[ra[4].1.clone()];
+    let node_new = &new_p[rb[4].1.clone()];
+    let (na, nb) = (record_ranges(node_old, 0), record_ranges(node_new, 0));
+    assert_eq!(na.len(), nb.len());
+    for (a, b) in na.iter().zip(&nb) {
+        if a.0 != 5005 && a.0 != 5008 {
+            assert_eq!(
+                node_old[a.1.clone()],
+                node_new[b.1.clone()],
+                "node record {}",
+                a.0
+            );
+        }
+    }
+
+    // Rescan: one Serum2 whose processor + controller equal what the same
+    // Serum becomes on a plain channel.
+    let plain_path = dir.join("plain.flp");
+    std::fs::write(&plain_path, synthetic_convertible_flp()).unwrap();
+    let plain_out = dir.join("plain_converted.flp");
+    let (code, _, stderr) = run_cli(&[
+        "convert",
+        "--out",
+        &plain_out.display().to_string(),
+        &plain_path.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let (nested, _) = scan_serum2_instances(&out).unwrap();
+    let (plain, _) = scan_serum2_instances(&std::fs::read(&plain_out).unwrap()).unwrap();
+    assert_eq!((nested.len(), plain.len()), (1, 1));
+    assert_eq!(nested[0].channel_name, "Chords > Lead");
+    assert_eq!(nested[0].processor, plain[0].processor);
+    assert_eq!(nested[0].controller, plain[0].controller);
+    let (left, stats) = scan_serum_instances(&out).unwrap();
+    assert!(left.is_empty());
+    assert_eq!(stats.serum2_count, 1);
+
+    // Nothing is left to convert the second time.
+    let (code, stdout, stderr) = run_cli(&[
+        "convert",
+        "--out",
+        &dir.join("again.flp").display().to_string(),
+        &out_arg,
+    ]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        format!("{stdout}{stderr}").contains("no convertible Serum instances found"),
+        "{stdout}{stderr}"
+    );
+}
+
+#[test]
+fn patcher_patch_renames_the_hosted_preset() {
+    let dir = temp_dir("patcher_patch");
+    let orig = synthetic_patcher_flp();
+    let flp_path = dir.join("patcher_project.flp");
+    std::fs::write(&flp_path, &orig).unwrap();
+    let out_path = dir.join("patched.flp");
+    let (code, stdout, stderr) = run_cli(&[
+        "patch",
+        "--name",
+        "Renamed In Patcher",
+        "--out",
+        &out_path.display().to_string(),
+        &flp_path.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("patching 1 Serum instance(s)"), "{stdout}");
+    assert!(stdout.contains("Chords > Lead"), "{stdout}");
+    let out = std::fs::read(&out_path).unwrap();
+    assert_fldt_len_ok(&out);
+
+    let (instances, _) = scan_serum_instances(&out).unwrap();
+    assert_eq!(instances.len(), 1);
+    assert_eq!(instances[0].chunk.meta.preset_name, "Renamed In Patcher");
+    assert_eq!(instances[0].channel_name, "Chords > Lead");
+    assert_eq!(instances[0].plugin_name, "Serum");
+
+    let evs_old = flp::parse_events(&orig).unwrap();
+    let evs_new = flp::parse_events(&out).unwrap();
+    let (old_sites, new_sites) = (
+        patcher::plugin_sites(evs_old[2].data),
+        patcher::plugin_sites(evs_new[2].data),
+    );
+    assert_eq!(new_sites[0].plugin_name, "Serum", "node name is kept");
+    assert_eq!(new_sites[0].label, "Lead");
+    assert_eq!(new_sites[1].payload, old_sites[1].payload);
+    assert_eq!(evs_old[3].data, evs_new[3].data);
+}
+
+#[test]
+fn patcher_without_serum_is_left_alone_by_convert_and_patch() {
+    let dir = temp_dir("patcher_noserum");
+    let orig = flp_from_events(vec![
+        (64, vec![0, 0]),
+        (203, utf16_event("Chords")),
+        (213, patcher_payload(&[("Vital", "Vital", vital_state())])),
+    ]);
+    let flp_path = dir.join("p.flp");
+    std::fs::write(&flp_path, &orig).unwrap();
+    let flp_arg = flp_path.display().to_string();
+    let (code, stdout, stderr) = run_cli(&["list", &flp_arg]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("0 Serum preset(s), 0 Serum2 instance(s)"),
+        "{stdout}"
+    );
+    let (code, stdout, stderr) = run_cli(&["convert", "--dry-run", &flp_arg]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        format!("{stdout}{stderr}").contains("no convertible Serum instances found"),
+        "{stdout}{stderr}"
+    );
+    let out_path = dir.join("patched.flp");
+    let (code, _, stderr) = run_cli(&[
+        "patch",
+        "--name",
+        "X",
+        "--out",
+        &out_path.display().to_string(),
+        &flp_arg,
+    ]);
+    // Nothing to patch: the CLI errors out and writes no file (the library
+    // level no-op is byte-identical, see the flpconv unit tests).
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("no Serum instances patched"), "{stderr}");
+    assert!(!out_path.exists());
+    assert_eq!(std::fs::read(&flp_path).unwrap(), orig, "input untouched");
+}
+
+// --- real-project tests (untracked fixture; skip silently when absent) ----
+
+fn patcher_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/patcher_serum2.flp")
+}
+
+fn have_patcher_fixture() -> bool {
+    if patcher_fixture().exists() {
+        true
+    } else {
+        eprintln!("skipping: untracked fixture absent (docs/flp-patcher.md)");
+        false
+    }
+}
+
+/// Indices of the event-213 payloads that are Patchers.
+fn patcher_event_indices(buf: &[u8]) -> Vec<usize> {
+    flp::parse_events(buf)
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.id == 213 && patcher::is_patcher(e.data))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+#[test]
+fn real_patcher_project_lists_nested_serum2() {
+    if !have_patcher_fixture() {
+        return;
+    }
+    let buf = std::fs::read(patcher_fixture()).unwrap();
+    let (s2, warnings) = scan_serum2_instances(&buf).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(s2.len(), 7);
+    assert_eq!(
+        s2.iter().filter(|s| s.channel_name.contains(" > ")).count(),
+        4
+    );
+    let names: Vec<&str> = s2.iter().map(|s| s.meta.preset_name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "MO_HA_SY_Chord_Edm_Saw",
+            "TSP_S2DG_Bass_mono_reese",
+            "JJP_S2RNBE_LEAD_rockstar_lead",
+            "RU_VB_pad_bloom",
+            "SM101 - DRONE - Transmitter",
+            "WW_NA_Synth_Pad_Through_the_Ringer",
+            " - Init - ",
+        ]
+    );
+    let (serum1, stats) = scan_serum_instances(&buf).unwrap();
+    assert!(serum1.is_empty());
+    assert_eq!(stats.serum2_count, 7);
+
+    let (code, stdout, stderr) = run_cli(&["list", &patcher_fixture().display().to_string()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("0 Serum preset(s), 7 Serum2 instance(s)"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn real_patcher_events_rewrite_byte_identically() {
+    if !have_patcher_fixture() {
+        return;
+    }
+    let buf = std::fs::read(patcher_fixture()).unwrap();
+    let evs = flp::parse_events(&buf).unwrap();
+    let patchers = patcher_event_indices(&buf);
+    assert_eq!(patchers.len(), 2, "the sample holds two Patchers");
+    let mut nodes = 0;
+    for &i in &patchers {
+        let ev = evs[i].data;
+        assert_eq!(patcher::rewrite(ev, &[]).unwrap(), ev, "empty edit list");
+        let sites = patcher::plugin_sites(ev);
+        let edits: Vec<NodeEdit> = sites
+            .iter()
+            .map(|s| NodeEdit {
+                path: s.path.clone(),
+                payload: s.payload.to_vec(),
+                plugin_name: None,
+            })
+            .collect();
+        nodes += edits.len();
+        // One node at a time and all at once.
+        for e in &edits {
+            assert_eq!(patcher::rewrite(ev, std::slice::from_ref(e)).unwrap(), ev);
+        }
+        assert_eq!(
+            patcher::rewrite(ev, &edits).unwrap(),
+            ev,
+            "all-node identity"
+        );
+        // Re-stating a node's own display name changes nothing either.
+        let renamed = NodeEdit {
+            plugin_name: Some(sites[0].plugin_name.clone()),
+            ..edits[0].clone()
+        };
+        assert_eq!(patcher::rewrite(ev, &[renamed]).unwrap(), ev);
+    }
+    // 2 plugin nodes (Serum 2 + Vital) + 3 Serum 2 nodes.
+    assert_eq!(nodes, 5);
+}
+
+#[test]
+fn real_patcher_project_converts_a_transplanted_serum_node() {
+    if !have_patcher_fixture() {
+        return;
+    }
+    let orig = std::fs::read(patcher_fixture()).unwrap();
+    let evs = flp::parse_events(&orig).unwrap();
+    let first = patcher_event_indices(&orig)[0];
+    let ev = evs[first].data;
+    let sites = patcher::plugin_sites(ev);
+    let target = sites
+        .iter()
+        .find(|s| s.plugin_name == "Serum 2")
+        .expect("a Serum 2 node in the first Patcher");
+    let target_path = target.path.clone();
+    let target_label = target.label.clone();
+
+    // Transplant a synthetic Serum 1 state (node name `Serum`) into it.
+    let transplanted_ev = patcher::rewrite(
+        ev,
+        &[NodeEdit {
+            path: target_path.clone(),
+            payload: synthetic_convertible_plugin_params(),
+            plugin_name: Some("Serum".into()),
+        }],
+    )
+    .unwrap();
+    let dir = temp_dir("patcher_real");
+    let input = dir.join("transplanted.flp");
+    let transplanted = replace_event_payload(&orig, first, &transplanted_ev);
+    assert_fldt_len_ok(&transplanted);
+    std::fs::write(&input, &transplanted).unwrap();
+    let (serum1, stats) = scan_serum_instances(&transplanted).unwrap();
+    assert_eq!(serum1.len(), 1);
+    assert_eq!(stats.serum2_count, 6);
+    assert!(
+        serum1[0]
+            .channel_name
+            .ends_with(&format!(" > {target_label}"))
+    );
+
+    let out_path = dir.join("converted.flp");
+    let (code, stdout, stderr) = run_cli(&[
+        "convert",
+        "--out",
+        &out_path.display().to_string(),
+        &input.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("converting 1 Serum instance(s)"),
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("-> converted (cid3").count(), 1, "{stdout}");
+    let out = std::fs::read(&out_path).unwrap();
+    assert_fldt_len_ok(&out);
+
+    // 7 Serum 2 again, no Serum left.
+    let (serum1, stats) = scan_serum_instances(&out).unwrap();
+    assert!(serum1.is_empty());
+    assert_eq!(stats.serum2_count, 7);
+    assert_eq!(scan_serum2_instances(&out).unwrap().0.len(), 7);
+
+    // Everything but the converted node is byte-identical.
+    let evs_in = flp::parse_events(&transplanted).unwrap();
+    let evs_out = flp::parse_events(&out).unwrap();
+    assert_eq!(evs_in.len(), evs_out.len());
+    for (i, (a, b)) in evs_in.iter().zip(&evs_out).enumerate() {
+        if i != first {
+            assert_eq!((a.id, a.data), (b.id, b.data), "event {i}");
+        }
+    }
+    let (pin, pout) = (evs_in[first].data, evs_out[first].data);
+    let (ra, rb) = (record_ranges(pin, 4), record_ranges(pout, 4));
+    assert_eq!(ra.len(), rb.len());
+    let node_idx = target_path[0];
+    for (i, (a, b)) in ra.iter().zip(&rb).enumerate() {
+        assert_eq!(a.0, b.0);
+        if i != node_idx {
+            assert_eq!(pin[a.1.clone()], pout[b.1.clone()], "record #{i}");
+        }
+    }
+    let (node_in, node_out) = (&pin[ra[node_idx].1.clone()], &pout[rb[node_idx].1.clone()]);
+    let (na, nb) = (record_ranges(node_in, 0), record_ranges(node_out, 0));
+    assert_eq!(na.len(), nb.len());
+    for (a, b) in na.iter().zip(&nb) {
+        if a.0 != 5005 && a.0 != 5008 {
+            assert_eq!(
+                node_in[a.1.clone()],
+                node_out[b.1.clone()],
+                "node record {}",
+                a.0
+            );
+        }
+    }
+    let converted = patcher::plugin_sites(pout);
+    let site = converted.iter().find(|s| s.path == target_path).unwrap();
+    assert_eq!(site.plugin_name, "Serum 2");
+    assert_eq!(site.label, target_label);
 }
