@@ -12,7 +12,8 @@ Both surfaces share the same core logic in `src/core.rs`, `src/flp.rs`,
 `src/s1state.rs` (Serum state parser), `src/importer.rs` (faithful port of
 Serum2.vst3's `s1state_load`), `src/s2tree.rs` + `src/serum2state.rs`
 (canonical CBOR + XferJson container), `src/flpconv.rs` (FLP event-213
-rewrite), and `src/s2tables.rs` — **GENERATED** (runtime-dumped descriptor
+rewrite), `src/patcher.rs` (plugins hosted inside FL Studio Patcher nodes:
+site enumeration + byte-exact node rewrite), and `src/s2tables.rs` — **GENERATED** (runtime-dumped descriptor
 tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 `docs/data/*.json` inputs are untracked — never hand-edit the file).
 `src/web.rs` is `#[cfg]`-gated to wasm targets only, so native
@@ -105,8 +106,8 @@ tables, provenance in `docs/s2-runtime-tables.md`; the generator and its
 
 Before touching FLP/Serum parsing, `.fxp` construction, or the conversion
 stack (`src/flp.rs`, `src/serum.rs`, `src/fxp.rs`, `src/s1state.rs`,
-`src/importer.rs`, `src/s2tree.rs`, `src/serum2state.rs`, `src/flpconv.rs`),
-read the relevant doc — they are the verified source of truth (static
+`src/importer.rs`, `src/s2tree.rs`, `src/serum2state.rs`, `src/flpconv.rs`,
+`src/patcher.rs`), read the relevant doc — they are the verified source of truth (static
 reverse-engineering + real-file calibration + dynamic Serum2 verification),
 not just design notes:
 - `docs/serum-fxp-format.md` — byte-level Serum `.fxp` spec.
@@ -118,6 +119,9 @@ not just design notes:
   vs Serum2 instances (the rewrite recipe).
 - `docs/flp-conversion.md` — the shipped FLP conversion feature (pipeline,
   surfaces, verification, limitations).
+- `docs/flp-patcher.md` — FL Studio Patcher event-213 layout (node records,
+  5005 = plain plugin payload), how hosted plugins are scanned / rewritten,
+  and what is NOT verified.
 - `docs/serum2-dynamic-verification.md` — live VST3-host verification. Read
   the CORRECTION section at the top first: `setState` **rejects** Serum
   data (the old "dynamically verified acceptance" conclusion was a false
@@ -132,6 +136,19 @@ docs above):
   parse time (`src/s1state.rs::parse_preset`) — the same thing the real
   Serum2 importer does. Embedded metadata lives at fixed offsets (name
   0x4972, version f32 0x4994, author 0x49A0, category 0x49D0).
+- Every event-213 scanner (`core::scan_serum_instances`,
+  `core::scan_serum2_instances`, `flpconv::scan_convertible_detailed`,
+  `flpconv::patch_serum_metadata`) must iterate `patcher::plugin_sites(ev.data)`
+  — never `ev.data` directly — or plugins hosted in FL Studio Patchers become
+  invisible again (a Patcher payload is `u32 version = 4` + records, which
+  `flp::parse_plugin_params` reads as a bare legacy blob). Keep the row
+  numbering of the scanners in sync (`InstancePlan::instance_index` vs the
+  core scan rows) and report nested instances as
+  `<channel or FX slot> > <node label>`. A nested `InstancePlan` carries
+  `node_path` and the node's 5005 payload; rewrite nested plans through
+  `patcher::rewrite`, never by re-framing the event by hand. The Serum →
+  Serum2 conversion inside a Patcher is verified structurally only (no real
+  Serum 1 in a Patcher, no FL load test) — see `docs/flp-patcher.md`.
 - Serum2 plugin instances are intentionally never extracted (they use an
   `XferJson`-prefixed state, not the Serum chunk layout) — only counted.
 - Zipped loop packages (`PK`-prefixed ZIP exports) are unpacked in memory by
@@ -172,6 +189,10 @@ CI) passes `cargo test` without them:
 - `tests/fixtures/serina1/*.fxp` (5 real Serum presets) and
   `tests/fixtures/serina1.flp` (real project: 5 Serum + 1 Serum2 instance)
   drive the converter tests.
+- `tests/fixtures/patcher_serum2.flp` — real project (FL Studio 26.1.6.5639)
+  with Serum 2 hosted in two Patchers (3 plain + 4 nested Serum 2; the
+  fixture holds no Serum 1) — drives the gated `real_patcher_*` tests in
+  `tests/integration.rs`; never commit it (gitignored).
 - `tests/fixtures/golden_s2/0N_processor_state.bin` — golden converted
   processor states produced by the REAL importer (called at runtime) and
   accepted by the real plugin — ground truth for `golden_byte_identical_*`;

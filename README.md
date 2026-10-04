@@ -6,6 +6,7 @@ FL Studio プロジェクトファイル (.flp) 内に埋め込まれた **Serum
 - Serum2 の Serum インポートチェック (静的逆解析、下記参照) を満たす fxp を生成
 - 書き出し前にバリデーションし、Serum2 が拒否するファイルは既定で出力しない
 - `convert`: FLP 内の Serum インスタンスを変換済み Serum2 インスタンスに書き換えた FLP を生成 (下記参照)
+- FL Studio の **Patcher** ノード内にホストされた Serum / Serum2 インスタンスも `list` / `extract` / `convert` / `patch` の対象 (Patcher 内の Serum → Serum2 変換は構造的な検証のみ、下記参照)
 - `convert-fxp`: 単体の Serum .fxp プリセットを Serum2 の .SerumPreset ファイルへ変換 (実験的、下記参照)
 - `patch`: fxp (または FLP 内の全 Serum インスタンス) のプリセット名 / 作者 / カテゴリを書き換え (下記参照)
 
@@ -74,6 +75,17 @@ FLP 内の Serum (シンセ) インスタンスごとにプリセット状態を
 再生には実際の Serum2 (VST3) のインストールが必要です。Web UI にも同じ変換があり、「Convert to Serum2」ボタンでブラウザ内で変換し `<名前>-serum2.flp` としてダウンロードできます。パイプラインと検証方法の詳細は [docs/flp-conversion.md](docs/flp-conversion.md) を参照してください。
 
 `extract` / `convert` は ZIP 連結 FLP (先頭が `PK` の "zipped loop package") も受け付けます。中の `*.flp` メンバーごとに 1 ドキュメントとして処理し、`convert` はメンバーごとに `<入力名>_<メンバー名>_serum2.flp` を出力します (`--out` は単一ドキュメント入力のときのみ指定可)。
+
+### Patcher 内のインスタンス
+
+FL Studio の **Patcher** にホストされた Serum / Serum2 も、通常のチャンネル上のインスタンスと同じように検出されます。場所は `<チャンネル名またはFXスロット名> > <ノードのラベル>` (例: `Intro Chord Patch > Serum 2 #4`) と表示されます。
+
+- `list` / `extract` / `extract --serum2`: Patcher 内の Serum / Serum2 も一覧・抽出されます
+- `convert`: Patcher 内の Serum ノードだけを Serum2 に書き換えます。ノードの保存状態 (5005) とプラグイン名 (5008) のみが変わり、ノードのラベル・ポート・配線・他のノードは元のバイト列のままです
+- `patch`: Patcher 内の Serum のプリセット名 / 作者 / カテゴリも書き換えます
+- Patcher 内の Serum FX は通常のスロットと同様に変換せず警告します
+
+**未検証**: 手元に Patcher 内の Serum 1 の実物はなく (実サンプルは Patcher 内の Serum 2)、Patcher 内の Serum → Serum2 変換は構造的な検証 (合成 Patcher と、実 Patcher 内の Serum 2 ノードへの Serum 状態の移植) のみです。変換後の FLP を FL Studio で開く検証は行っていません。Patcher 内に Patcher を入れた入れ子は実物で観測しておらず、確認した FL Studio も 26.1.6.5639 のみです。オートメーションや Patcher のコントロールサーフェスから Serum パラメータへのリンクは再マップされません。詳細は [docs/flp-patcher.md](docs/flp-patcher.md)。
 
 ### 入力の指定 (ディレクトリ / glob)
 
@@ -170,6 +182,8 @@ cid = 3 のペイロード (Serum の場合) は fxp の `chunk` 領域そのも
 
 Serum2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外です。
 
+Patcher のイベント 213 は上記のプラグイン状態ではなく Patcher 自身のグラフ文書で、`u32 LE バージョン = 4` + `[u32 cid][u64 サイズ][データ]` 列 (先頭レコードは cid 1000) です。ホストされた各プラグインは外側 `cid = 0` のノードコンテナに入り、その内側レコード 5005 が**通常のイベント 213 ペイロードとバイト単位で同じ構造**のプラグイン保存状態です (5008 = プラグイン名、5010 = ノードのラベル、いずれも UTF-16LE)。そのため既存の Serum / Serum2 判定と書き換えロジックをそのまま適用でき、すべてのイベント 213 スキャナは `patcher::plugin_sites` でイベント内のプラグイン状態を列挙します。レコード構成と未解明の部分は [docs/flp-patcher.md](docs/flp-patcher.md) を参照してください。
+
 ### Serum fxp 形式 (60 バイトヘッダ、マルチバイトはビッグエンディアン)
 
 | オフセット | サイズ | フィールド | 値 |
@@ -207,6 +221,7 @@ Serum2 の状態 (cid = 3 が `XferJson...` で始まる) は抽出対象外で�
 - **zipped loop package**: 先頭が `PK` の ZIP 梱包 FLP はメモリ上で展開され、`*.flp` メンバーごとに処理されます (暗号化 / Zip64 アーカイブは拒否)。実物の FL Studio エクスポートでの検証は未実施です
 - **VST2 / VstW はベストエフォート**: VST2 ラッパー (`VstW`) 内の `CcnK` プリセットは探索して復元しますが、全レイアウトは検証していません
 - **Serum2 インスタンスは抽出しない**: 件数の報告のみ行います (Serum2 は XferJson 状態を使うため対象外)
+- **Patcher 内のインスタンス**: Patcher 内の Serum → Serum2 変換は構造的な検証のみです (実物の Patcher 内 Serum 1 なし、FL Studio での読み込み検証なし、入れ子の Patcher は未観測)。オートメーション / Patcher コントロールサーフェスのリンクは再マップせず、ノードのラベルは変更しません。詳細は [docs/flp-patcher.md](docs/flp-patcher.md)
 - **`convert` の制限**: 新形式の Serum プリセット (172,736 バイト状態) のみ変換。旧形式 (2015 年頃) のプリセットは変換せず報告、Serum FX インスタンスは対象外。詳細は [docs/flp-conversion.md](docs/flp-conversion.md)
 
 ## テスト
@@ -216,5 +231,7 @@ cargo test
 ```
 
 ユニットテスト (FLP パーサ / 状態解析 / fxp 構築・検証) に加え、合成 FLP からの `extract` → `validate` を実行する統合テスト (`tests/integration.rs`) と、実フィクスチャ fxp の検証テストを含みます。
+
+Patcher 内のインスタンスは、実サンプルの Patcher から切り出したレコードで組み立てた合成 Patcher (`src/testutil.rs`、`tests/integration.rs`) で、検出・ノード書き換えのバイト一致 (編集なし / 変更なしの書き換えは入力とバイト単位で同一)・サイズ補正・古い変換計画の拒否・CLI の `list` / `extract` / `convert` / `patch` を検証します。さらに実プロジェクト (`tests/fixtures/patcher_serum2.flp`、Patcher 内の Serum 2 が 4 つを含む計 7 つ。リポジトリ外・`.gitignore` 済みで、無ければテストは黙ってスキップされます) では、7 つの Serum 2 の検出、Patcher イベントのバイト一致の書き換え、Serum 状態を移植したノードの `convert` を検証します。
 
 `convert` は 5 プリセット分の golden 変換状態 (`tests/fixtures/golden_s2/`、実インポータが生成したもの) とのバイト一致テストと、実プロジェクト (`tests/fixtures/serina1.flp`) を変換した FLP の再スキャン / 差分テストで検証します。

@@ -52,6 +52,14 @@ input (plain .flp, or zipped loop package → unpacked in memory       src/zip.r
   → event splice + FLdt u32 length fix                src/flpconv.rs::apply
 ```
 
+Plugins hosted inside an FL Studio **Patcher** are reached through
+`patcher::plugin_sites`: every event-213 scanner iterates the plugin sites of
+an event (the event itself for a plain plugin, one site per hosted plugin node
+of a Patcher) instead of the raw payload, and `apply` rewrites a Patcher node's
+5005 record via `patcher::rewrite` (all other bytes verbatim). See
+`flp-patcher.md` — the Serum → Serum2 path inside a Patcher is verified
+structurally only.
+
 | Stage | Module | Ground truth |
 |---|---|---|
 | event scan / planning | `src/flp.rs`, `src/serum.rs`, `src/flpconv.rs::scan_convertible_detailed` | `flp-serum2-conversion.md` §1–§5 |
@@ -88,6 +96,7 @@ silently when absent, so a fresh clone builds and tests green.
 | `tests/fixtures/serina1.flp` | the sample FL Studio project (5 Serum + 1 Serum2) | copy from the local sample library (`assets/`, untracked) |
 | `tests/fixtures/golden_s2/0N_processor_state.bin` | converted processor records produced by the REAL importer | call `s1state_load` at runtime per `docs/s2-runtime-tables.md` (harness method), wrap with `serum2state::build_processor_record`-equivalent container rules |
 | `tests/fixtures/extracted_serum1.fxp` | extraction-feature fixture | `flp-extract-fxp extract` on the sample project, keep preset 01 |
+| `tests/fixtures/patcher_serum2.flp` | real project with Serum 2 inside two FL Studio Patchers (3 plain + 4 nested Serum 2; FL 26.1.6.5639) | any FL project that hosts Serum2 in a Patcher; see `flp-patcher.md` |
 | `tests/fixtures/legacy/*.fxp` + `*_importer_tree.cbor` | 6 legacy (2015-era) presets and the REAL importer's converted trees for them | call `s1state_load` on each raw fxp chunk (ctypes harness, §Verification), dump the walked tree as canonical CBOR (`*_importer_tree.cbor`) |
 | `docs/data/*.json` | runtime-dumped descriptor / remap / defaults tables | dump per `docs/s2-runtime-tables.md` (LoadLibraryW + InitDll + memory reads) |
 | `C:\Users\cabbage\Documents\Xfer\Serum 2 Presets\Presets\Factory\**\*.SerumPreset` | the 626 real Serum2 factory presets (read-only, never copied into the repo) | shipped with any Serum2 install; the `corpus_preset_round_trip` test reads 5 of them only when `FLPX_S2_CORPUS_DIR` points there |
@@ -274,3 +283,12 @@ warnings/output):
   this — proven by the sample project (the converted FLP loads and the states
   are accepted). The processor record, which we synthesize fresh, carries
   2.0.23 / version 9.0.
+- **(f) Patcher-hosted Serum is converted but not verified in FL Studio**:
+  Serum / Serum2 nodes inside an FL Studio Patcher are listed, extracted,
+  converted and patched (`flp-patcher.md`), but no real Serum 1 inside a
+  Patcher was available (the sample hosts Serum 2) and no converted Patcher
+  project was opened in FL Studio, so the nested conversion is verified
+  structurally only. Nested Patchers (a Patcher inside a Patcher) were never
+  observed, only FL 26.1.6.5639 was seen, automation / Patcher control-surface
+  links to Serum parameters are not remapped, the node label is kept and Serum
+  FX inside a Patcher is not converted.
