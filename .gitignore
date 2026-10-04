@@ -44,3 +44,4 @@ target
 /docs/data/*.json
 /tools/
 /tests/fixtures/legacy/
+/tests/fixtures/patcher_serum2.flp

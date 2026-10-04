@@ -13,6 +13,7 @@ use std::ops::Range;
 use crate::core::{display_name, text};
 use crate::flp;
 use crate::fxp;
+use crate::patcher;
 use crate::s1state;
 use crate::s2tree;
 use crate::serum;
@@ -24,6 +25,10 @@ use crate::serum2state;
 const SERUM2_UID: [u8; 16] = [
     0x58, 0x45, 0x53, 0x56, 0x73, 0x66, 0x73, 0x50, 0x65, 0x72, 0x75, 0x6D, 0x20, 0x32, 0x00, 0x00,
 ];
+
+/// Display name (Patcher node record 5008) of a converted Patcher node; the
+/// node label (5010) is kept as-is.
+const SERUM2_NODE_NAME: &str = "Serum 2";
 
 /// Everything needed to turn one Serum instance into a Serum2 instance.
 /// Built by the orchestrator (the importer runs elsewhere); flpconv only does
@@ -53,9 +58,17 @@ pub struct InstancePlan {
     /// Byte offset of the event id in the FLdt stream (diagnostics only).
     pub event_offset: usize,
     pub channel: Option<u16>,
+    /// Channel / FX slot name; for a plugin hosted in a Patcher the node
+    /// label is appended (`<channel> > <node label>`).
     pub channel_name: String,
     pub plugin_name: String,
-    /// The ORIGINAL event-213 payload (verbatim).
+    /// Patcher node path (see [`patcher::PluginSite::path`]): empty when the
+    /// plugin owns its event, otherwise the plugin lives in a node of the
+    /// Patcher event at `event_index`.
+    pub node_path: Vec<usize>,
+    /// The ORIGINAL plugin state (verbatim): the event-213 payload, or the
+    /// hosting Patcher node's 5005 record data when `node_path` is not empty
+    /// (same layout either way).
     pub payload: Vec<u8>,
     /// The original plugin filename (cid 55), decoded lossily.
     pub plugin_filename: String,
@@ -380,73 +393,78 @@ pub fn scan_convertible_detailed(buf: &[u8]) -> Result<(Vec<InstancePlan>, Vec<S
                 cur_fx_name = text(ev.data);
             }
             flp::EV_PLUGIN_PARAMS => {
-                let Ok(pp) = flp::parse_plugin_params(ev.data) else {
-                    continue;
-                };
-                if serum::is_serum2(pp.name, pp.filename) {
-                    continue;
-                }
-                let where_ = cur_channel
+                let base = cur_channel
                     .and_then(|c| channels.get(&c).cloned())
                     .unwrap_or_else(|| cur_fx_name.clone());
-                if serum::is_serum_fx(pp.name, pp.filename) {
-                    warnings.push(format!(
-                        "Serum FX instance on channel '{where_}' left untouched (only the Serum synth is converted)"
-                    ));
-                    // Row bookkeeping must match `scan_serum_instances`,
-                    // which gives an FX instance a table row only when its
-                    // chunk recovers; count it silently (the recovery
-                    // failure is that scan's business to report).
-                    if !pp.state.is_empty() && serum::serum1_chunk_from_state(pp.state).is_ok() {
-                        rows_seen += 1;
+                for site in patcher::plugin_sites(ev.data) {
+                    let Ok(pp) = flp::parse_plugin_params(site.payload) else {
+                        continue;
+                    };
+                    if serum::is_serum2(pp.name, pp.filename) {
+                        continue;
                     }
-                    continue;
-                }
-                if !serum::is_serum1_synth(pp.name, pp.filename) || pp.state.is_empty() {
-                    continue;
-                }
-                // Single-walk: recover the cid-3 chunk and parse the preset
-                // here so bundling never has to re-inflate the state. A
-                // parse failure yields None + a warning (never aborts).
-                let mut instance_index = None;
-                let (preset_name, s1) = match serum::serum1_chunk_from_state(pp.state) {
-                    Ok(chunk) => {
-                        // The core scan emits a table row for every instance
-                        // whose chunk recovers — parseable or not — so
-                        // remember this plan's row before parsing.
-                        instance_index = Some(rows_seen);
-                        rows_seen += 1;
-                        match s1state::parse_preset(&chunk.chunk) {
-                            Ok(preset) => (chunk.meta.preset_name, Some(preset)),
-                            Err(e) => {
-                                warnings.push(format!(
-                                    "instance on channel '{}': {e}",
-                                    display_name(&where_)
-                                ));
-                                (chunk.meta.preset_name, None)
+                    let where_ = site.location(&base);
+                    if serum::is_serum_fx(pp.name, pp.filename) {
+                        warnings.push(format!(
+                            "Serum FX instance on channel '{where_}' left untouched (only the Serum synth is converted)"
+                        ));
+                        // Row bookkeeping must match `scan_serum_instances`,
+                        // which gives an FX instance a table row only when its
+                        // chunk recovers; count it silently (the recovery
+                        // failure is that scan's business to report).
+                        if !pp.state.is_empty() && serum::serum1_chunk_from_state(pp.state).is_ok()
+                        {
+                            rows_seen += 1;
+                        }
+                        continue;
+                    }
+                    if !serum::is_serum1_synth(pp.name, pp.filename) || pp.state.is_empty() {
+                        continue;
+                    }
+                    // Single-walk: recover the cid-3 chunk and parse the preset
+                    // here so bundling never has to re-inflate the state. A
+                    // parse failure yields None + a warning (never aborts).
+                    let mut instance_index = None;
+                    let (preset_name, s1) = match serum::serum1_chunk_from_state(pp.state) {
+                        Ok(chunk) => {
+                            // The core scan emits a table row for every instance
+                            // whose chunk recovers — parseable or not — so
+                            // remember this plan's row before parsing.
+                            instance_index = Some(rows_seen);
+                            rows_seen += 1;
+                            match s1state::parse_preset(&chunk.chunk) {
+                                Ok(preset) => (chunk.meta.preset_name, Some(preset)),
+                                Err(e) => {
+                                    warnings.push(format!(
+                                        "instance on channel '{}': {e}",
+                                        display_name(&where_)
+                                    ));
+                                    (chunk.meta.preset_name, None)
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        warnings.push(format!(
-                            "instance on channel '{}': {e}",
-                            display_name(&where_)
-                        ));
-                        (String::new(), None)
-                    }
-                };
-                plans.push(InstancePlan {
-                    event_index: i,
-                    event_offset: ev_off - dt_start,
-                    channel: cur_channel,
-                    channel_name: where_,
-                    plugin_name: text(pp.name),
-                    payload: ev.data.to_vec(),
-                    plugin_filename: String::from_utf8_lossy(pp.filename).into_owned(),
-                    preset_name,
-                    s1,
-                    instance_index,
-                });
+                        Err(e) => {
+                            warnings.push(format!(
+                                "instance on channel '{}': {e}",
+                                display_name(&where_)
+                            ));
+                            (String::new(), None)
+                        }
+                    };
+                    plans.push(InstancePlan {
+                        event_index: i,
+                        event_offset: ev_off - dt_start,
+                        channel: cur_channel,
+                        channel_name: where_,
+                        plugin_name: text(pp.name),
+                        node_path: site.path.clone(),
+                        payload: site.payload.to_vec(),
+                        plugin_filename: String::from_utf8_lossy(pp.filename).into_owned(),
+                        preset_name,
+                        s1,
+                        instance_index,
+                    });
+                }
             }
             _ => {}
         }
@@ -502,6 +520,11 @@ pub fn filter_plans_by_rows(plans: &[InstancePlan], rows: &[u32]) -> (Vec<usize>
 /// other event stays byte-identical and everything before the FLdt payload is
 /// preserved; the output never has trailing bytes.
 ///
+/// A plan with a non-empty `node_path` lives inside a Patcher: only that
+/// node's plugin state (record 5005) is replaced and its display name
+/// (5008) set to `Serum 2`; the node label, header, ports, wires and every
+/// other node stay verbatim ([`patcher::rewrite`]).
+///
 /// `plans` order must match `bundles` order (1:1; None = skip that instance).
 pub fn apply(
     buf: &[u8],
@@ -531,7 +554,10 @@ pub fn apply(
                 plan.event_index, ev.id
             ));
         }
-        if ev.data != plan.payload.as_slice() {
+        let site = patcher::site_payload(ev.data, &plan.node_path).map_err(|e| {
+            format!("plan {i} no longer matches the buffer (stale InstancePlan?): {e}")
+        })?;
+        if site != plan.payload.as_slice() {
             return Err(format!(
                 "plan {i} payload does not match the buffer (stale InstancePlan?)"
             ));
@@ -540,8 +566,10 @@ pub fn apply(
 
     let (_, dt_len_pos, dt_start, _) = locate_chunks(buf)?;
 
-    // 2. Build the replacement payloads.
-    let mut replacements: HashMap<usize, Vec<u8>> = HashMap::new();
+    // 2. Build the replacement payloads: whole-event ones for plugins that
+    //    own their event, per-node edits for plugins hosted in a Patcher.
+    let mut whole: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut node_edits: HashMap<usize, Vec<patcher::NodeEdit>> = HashMap::new();
     let mut report = FlpConversionReport::default();
     for (i, (plan, bundle)) in plans.iter().zip(bundles).enumerate() {
         let Some(b) = bundle else {
@@ -551,19 +579,30 @@ pub fn apply(
             ));
             continue;
         };
-        if replacements
-            .insert(plan.event_index, build_serum2_payload(&plan.payload, b)?)
-            .is_some()
-        {
-            return Err(format!("plan {i} duplicates event {}", plan.event_index));
+        let new_payload = build_serum2_payload(&plan.payload, b)?;
+        let new_payload_len = new_payload.len();
+        if plan.node_path.is_empty() {
+            if whole.insert(plan.event_index, new_payload).is_some() {
+                return Err(format!("plan {i} duplicates event {}", plan.event_index));
+            }
+        } else {
+            node_edits
+                .entry(plan.event_index)
+                .or_default()
+                .push(patcher::NodeEdit {
+                    path: plan.node_path.clone(),
+                    payload: new_payload,
+                    plugin_name: Some(SERUM2_NODE_NAME.into()),
+                });
         }
         report.converted.push(ConvertedInstance {
             channel: plan.channel,
             channel_name: plan.channel_name.clone(),
             preset_name: plan.preset_name.clone(),
-            new_payload_len: replacements[&plan.event_index].len(),
+            new_payload_len,
         });
     }
+    let replacements = merge_node_edits(&spans, whole, node_edits)?;
 
     // 3. Splice: everything before the FLdt payload verbatim, then re-emit
     //    each event (replaced ones with fresh framing).
@@ -618,7 +657,9 @@ pub struct FlpPatchReport {
 /// spliced back with fresh record framing and a fixed FLdt u32 length.
 /// Non-plugin events and everything before the FLdt payload stay
 /// byte-identical. Instances whose state cannot be patched are skipped with
-/// a warning (never aborts).
+/// a warning (never aborts). Instances hosted inside a Patcher node are
+/// patched in place (only the node's plugin state record changes, see
+/// [`patcher::rewrite`]).
 pub fn patch_serum_metadata(
     buf: &[u8],
     patches: &[fxp::PatchField],
@@ -633,7 +674,8 @@ pub fn patch_serum_metadata(
     let mut channels: HashMap<u16, String> = HashMap::new();
     let mut cur_channel: Option<u16> = None;
     let mut cur_fx_name = String::new();
-    let mut replacements: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut whole: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut node_edits: HashMap<usize, Vec<patcher::NodeEdit>> = HashMap::new();
     let mut report = FlpPatchReport::default();
 
     for (i, (_off, ev)) in spans.iter().enumerate() {
@@ -652,62 +694,74 @@ pub fn patch_serum_metadata(
                 cur_fx_name = text(ev.data);
             }
             flp::EV_PLUGIN_PARAMS => {
-                let Ok(pp) = flp::parse_plugin_params(ev.data) else {
-                    continue;
-                };
-                if serum::is_serum2(pp.name, pp.filename) {
-                    continue;
-                }
-                let where_ = cur_channel
+                let base = cur_channel
                     .and_then(|c| channels.get(&c).cloned())
                     .unwrap_or_else(|| cur_fx_name.clone());
-                if serum::is_serum_fx(pp.name, pp.filename) {
-                    report.warnings.push(format!(
-                        "Serum FX instance on channel '{where_}' left untouched"
-                    ));
-                    continue;
-                }
-                if !serum::is_serum1_synth(pp.name, pp.filename) || pp.state.is_empty() {
-                    continue;
-                }
-                let old_name = serum::serum1_chunk_from_state(pp.state)
-                    .map(|c| c.meta.preset_name)
-                    .unwrap_or_default();
-                let new_payload = match patch_event_payload(ev.data, patches) {
-                    Ok(p) => p,
-                    Err(e) => {
+                for site in patcher::plugin_sites(ev.data) {
+                    let Ok(pp) = flp::parse_plugin_params(site.payload) else {
+                        continue;
+                    };
+                    if serum::is_serum2(pp.name, pp.filename) {
+                        continue;
+                    }
+                    let where_ = site.location(&base);
+                    if serum::is_serum_fx(pp.name, pp.filename) {
                         report.warnings.push(format!(
-                            "instance on channel '{}': {e}",
-                            display_name(&where_)
+                            "Serum FX instance on channel '{where_}' left untouched"
                         ));
                         continue;
                     }
-                };
-                replacements.insert(i, new_payload);
-                let new_name = match patches.iter().rev().find_map(|p| match p {
-                    fxp::PatchField::Name(s) => Some(s.clone()),
-                    _ => None,
-                }) {
-                    Some(s) => {
-                        let mut b = s.as_bytes().to_vec();
-                        b.truncate(31);
-                        while std::str::from_utf8(&b).is_err() {
-                            b.pop();
-                        }
-                        String::from_utf8_lossy(&b).into_owned()
+                    if !serum::is_serum1_synth(pp.name, pp.filename) || pp.state.is_empty() {
+                        continue;
                     }
-                    None => old_name.clone(),
-                };
-                report.patched.push(PatchedInstance {
-                    channel: cur_channel,
-                    channel_name: where_,
-                    old_preset_name: old_name,
-                    new_preset_name: new_name,
-                });
+                    let old_name = serum::serum1_chunk_from_state(pp.state)
+                        .map(|c| c.meta.preset_name)
+                        .unwrap_or_default();
+                    let new_payload = match patch_event_payload(site.payload, patches) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            report.warnings.push(format!(
+                                "instance on channel '{}': {e}",
+                                display_name(&where_)
+                            ));
+                            continue;
+                        }
+                    };
+                    if site.path.is_empty() {
+                        whole.insert(i, new_payload);
+                    } else {
+                        node_edits.entry(i).or_default().push(patcher::NodeEdit {
+                            path: site.path.clone(),
+                            payload: new_payload,
+                            plugin_name: None,
+                        });
+                    }
+                    let new_name = match patches.iter().rev().find_map(|p| match p {
+                        fxp::PatchField::Name(s) => Some(s.clone()),
+                        _ => None,
+                    }) {
+                        Some(s) => {
+                            let mut b = s.as_bytes().to_vec();
+                            b.truncate(31);
+                            while std::str::from_utf8(&b).is_err() {
+                                b.pop();
+                            }
+                            String::from_utf8_lossy(&b).into_owned()
+                        }
+                        None => old_name.clone(),
+                    };
+                    report.patched.push(PatchedInstance {
+                        channel: cur_channel,
+                        channel_name: where_,
+                        old_preset_name: old_name,
+                        new_preset_name: new_name,
+                    });
+                }
             }
             _ => {}
         }
     }
+    let replacements = merge_node_edits(&spans, whole, node_edits)?;
 
     // Splice: everything before the FLdt payload verbatim, re-emit each
     // event (replaced ones with fresh framing), then fix the FLdt length.
@@ -790,6 +844,29 @@ fn patch_event_payload(orig: &[u8], patches: &[fxp::PatchField]) -> Result<Vec<u
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Fold per-node Patcher edits into whole-event replacement payloads. An
+/// event cannot be replaced as a whole and edited per node at once.
+fn merge_node_edits(
+    spans: &[(usize, flp::Event<'_>)],
+    mut whole: HashMap<usize, Vec<u8>>,
+    node_edits: HashMap<usize, Vec<patcher::NodeEdit>>,
+) -> Result<HashMap<usize, Vec<u8>>, String> {
+    for (event_index, edits) in node_edits {
+        if whole.contains_key(&event_index) {
+            return Err(format!(
+                "event {event_index} is replaced as a whole and edited per Patcher node"
+            ));
+        }
+        let Some((_, ev)) = spans.get(event_index) else {
+            return Err(format!("event {event_index} is out of range"));
+        };
+        let payload = patcher::rewrite(ev.data, &edits)
+            .map_err(|e| format!("Patcher in event {event_index}: {e}"))?;
+        whole.insert(event_index, payload);
+    }
+    Ok(whole)
+}
 
 /// A `[u32 cid][u64 size][data]` record; `data` indexes into the parsed buffer.
 struct TopRecord {
@@ -951,83 +1028,15 @@ fn build_serum2_payload(orig: &[u8], b: &Serum2Bundle) -> Result<Vec<u8>, String
 mod tests {
     use super::*;
     use crate::flp::{EV_NEW_CHANNEL, EV_TEXT_CHANNEL_NAME};
-    use crate::testutil::{build_flp, zlib_stream};
-
-    const CID1_S1: [u8; 20] = [
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
-    const CID2_S1: [u8; 25] = [
-        0x00, 0xA0, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00, 0x00, 0x8D, 0x7D, 0x20, 0xA4, 0x00, 0x00,
-        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
-    const C30: [u8; 16] = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    const C32: [u8; 12] = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
-    const C50: [u8; 16] = [0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    const S1_UID: [u8; 16] = [
-        0x58, 0x54, 0x53, 0x56, 0x73, 0x66, 0x73, 0x58, 0x65, 0x72, 0x75, 0x6D, 0x00, 0x00, 0x00,
-        0x00,
-    ];
-    const S2_UID: [u8; 16] = [
-        0x58, 0x45, 0x53, 0x56, 0x73, 0x66, 0x73, 0x50, 0x65, 0x72, 0x75, 0x6D, 0x20, 0x32, 0x00,
-        0x00,
-    ];
-
-    /// Real-shaped Serum inner cid 3: zlib preset state (preset name at
-    /// 0x4972) + a second wavetable stream + u32 LE trailer (doc §3.3).
-    fn s1_cid3() -> Vec<u8> {
-        let mut s0 = vec![0u8; serum::SERUM1_STATE_SIZE];
-        s0[serum::OFF_PRESET_NAME..serum::OFF_PRESET_NAME + 11].copy_from_slice(b"TestPreset\0");
-        s0[serum::OFF_VERSION_F32..serum::OFF_VERSION_F32 + 4]
-            .copy_from_slice(&0.1631f32.to_le_bytes());
-        let z0 = zlib_stream(&s0);
-        let z1 = zlib_stream(&[0u8; 8192]);
-        let mut v = z0.clone();
-        v.extend_from_slice(&z1);
-        v.extend_from_slice(&(z0.len() as u32).to_le_bytes());
-        v
-    }
+    use crate::testutil::{
+        C30, C32, C50, CID1_S1, CID2_S1, S2_UID, build_flp, other_plugin_payload, patcher_event,
+        patcher_plugin_node, s1_cid3, serum1_payload, serum1_payload_with, serum2_payload,
+    };
 
     fn top_rec(cid: u32, data: &[u8]) -> Vec<u8> {
         let mut v = Vec::new();
         push_rec(&mut v, cid, data);
         v
-    }
-
-    /// A realistic Serum event-213 payload (doc §2.1 / §3).
-    fn serum1_payload(name: &str, filename: &str) -> Vec<u8> {
-        serum1_payload_with(name, filename, s1_cid3())
-    }
-
-    /// Same, with a caller-supplied inner cid 3 (to fake broken chunks).
-    fn serum1_payload_with(name: &str, filename: &str, cid3: Vec<u8>) -> Vec<u8> {
-        let mut cid4 = Vec::new();
-        cid4.extend_from_slice(&3u32.to_le_bytes());
-        cid4.extend_from_slice(&0u32.to_le_bytes());
-        cid4.extend_from_slice(&1u32.to_le_bytes());
-        cid4.extend_from_slice(&2u32.to_le_bytes());
-
-        let mut wrapper = Vec::new();
-        wrapper.extend_from_slice(&1u32.to_le_bytes());
-        let mut inner1 = vec![0u8; 64];
-        inner1[0..4].copy_from_slice(&1u32.to_le_bytes());
-        wrapper.extend_from_slice(&top_rec(1, &inner1));
-        wrapper.extend_from_slice(&top_rec(3, &cid3));
-        wrapper.extend_from_slice(&top_rec(4, &cid4));
-
-        let mut p = Vec::new();
-        p.extend_from_slice(&12u32.to_le_bytes());
-        p.extend_from_slice(&top_rec(1, &CID1_S1));
-        p.extend_from_slice(&top_rec(2, &CID2_S1));
-        p.extend_from_slice(&top_rec(30, &C30));
-        p.extend_from_slice(&top_rec(32, &C32));
-        p.extend_from_slice(&top_rec(50, &C50));
-        p.extend_from_slice(&top_rec(52, &S1_UID));
-        p.extend_from_slice(&top_rec(54, name.as_bytes()));
-        p.extend_from_slice(&top_rec(55, filename.as_bytes()));
-        p.extend_from_slice(&top_rec(56, b"Xfer Records"));
-        p.extend_from_slice(&top_rec(53, &wrapper));
-        p
     }
 
     fn utf16_name(s: &str) -> Vec<u8> {
@@ -1492,6 +1501,7 @@ mod tests {
             channel: Some(0),
             channel_name: "Serum".into(),
             plugin_name: "Serum".into(),
+            node_path: Vec::new(),
             payload: Vec::new(),
             plugin_filename: "/Library/Audio/Plug-Ins/VST3/Serum.vst3".into(),
             preset_name: String::new(),
@@ -1522,6 +1532,7 @@ mod tests {
             channel: Some(3),
             channel_name: "Old".into(),
             plugin_name: "Serum".into(),
+            node_path: Vec::new(),
             payload: Vec::new(),
             plugin_filename: "Serum_x64.dll".into(),
             preset_name: String::new(),
@@ -1744,5 +1755,381 @@ mod tests {
         assert!(rep.patched.is_empty());
         assert_eq!(rep.warnings.len(), 1);
         assert!(rep.warnings[0].contains("Serum FX"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Plugins hosted inside an FL Studio Patcher
+    // -----------------------------------------------------------------------
+
+    const S1_FILE: &str = "/Library/Audio/Plug-Ins/VST3/Serum.vst3";
+    const FX_FILE: &str = "/Library/Audio/Plug-Ins/VST3/Serum FX.vst3";
+    const S2_FILE: &str = "/Library/Audio/Plug-Ins/VST3/Serum2.vst3";
+
+    fn vital() -> Vec<u8> {
+        other_plugin_payload("Vital", "/Library/Audio/Plug-Ins/VST3/Vital.vst3")
+    }
+
+    /// FLP with channel 7 `Patch` hosting a Patcher whose plugin nodes are
+    /// `(display name, label, state)`; node records start at index 4 (after
+    /// 1000, 1002, 1004 and the Control Surface node).
+    fn patcher_flp(nodes: &[(&str, &str, Vec<u8>)]) -> Vec<u8> {
+        let ids: Vec<u32> = (0..nodes.len() as u32).map(|i| 0x3ec + 9 * i).collect();
+        let recs: Vec<Vec<u8>> = nodes
+            .iter()
+            .zip(&ids)
+            .map(|((display, label, state), id)| patcher_plugin_node(*id, display, label, state))
+            .collect();
+        build_flp(&[
+            (EV_NEW_CHANNEL, vec![7, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("Patch")),
+            (flp::EV_PLUGIN_PARAMS, patcher_event(&recs, &ids)),
+            (128, vec![1, 2, 3, 4]),
+        ])
+    }
+
+    #[test]
+    fn scan_finds_serum_inside_patcher() {
+        let buf = patcher_flp(&[
+            ("Vital", "Vital", vital()),
+            ("Serum", "Lead", serum1_payload("Serum", S1_FILE)),
+        ]);
+        let (plans, warnings) = scan_convertible_detailed(&buf).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(plans.len(), 1);
+        let p = &plans[0];
+        assert_eq!(p.event_index, 2);
+        assert_eq!(p.node_path, vec![5]);
+        assert_eq!(p.channel, Some(7));
+        assert_eq!(p.channel_name, "Patch > Lead");
+        assert_eq!(p.plugin_name, "Serum");
+        assert_eq!(p.preset_name, "TestPreset");
+        assert!(p.s1.is_some());
+        assert_eq!(p.instance_index, Some(0));
+        assert_eq!(p.payload, serum1_payload("Serum", S1_FILE));
+        // The core scan reports the same instance at the same row.
+        let (instances, _) = crate::core::scan_serum_instances(&buf).unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].channel_name, "Patch > Lead");
+        assert_eq!(instances[0].chunk.meta.preset_name, "TestPreset");
+    }
+
+    #[test]
+    fn instance_index_counts_patcher_rows() {
+        // Rows: plain synth 0, Patcher{FX 1, synth 2}, plain synth 3.
+        let patcher = patcher_event(
+            &[
+                patcher_plugin_node(
+                    0x3ec,
+                    "Serum FX",
+                    "Fx",
+                    &serum1_payload("Serum FX", FX_FILE),
+                ),
+                patcher_plugin_node(0x3f5, "Serum", "Synth", &serum1_payload("Serum", S1_FILE)),
+            ],
+            &[0x3ec, 0x3f5],
+        );
+        let buf = build_flp(&[
+            (EV_NEW_CHANNEL, vec![0, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("A")),
+            (flp::EV_PLUGIN_PARAMS, serum1_payload("Serum", S1_FILE)),
+            (EV_NEW_CHANNEL, vec![1, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("B")),
+            (flp::EV_PLUGIN_PARAMS, patcher),
+            (EV_NEW_CHANNEL, vec![2, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("C")),
+            (flp::EV_PLUGIN_PARAMS, serum1_payload("Serum", S1_FILE)),
+        ]);
+        let (plans, warnings) = scan_convertible_detailed(&buf).unwrap();
+        assert_eq!(
+            plans.iter().map(|p| p.instance_index).collect::<Vec<_>>(),
+            vec![Some(0), Some(2), Some(3)]
+        );
+        assert_eq!(
+            plans
+                .iter()
+                .map(|p| p.channel_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B > Synth", "C"]
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("'B > Fx'"), "{}", warnings[0]);
+        let (instances, _) = crate::core::scan_serum_instances(&buf).unwrap();
+        assert_eq!(instances.len(), 4);
+        assert_eq!(instances[2].channel_name, "B > Synth");
+        // Selecting row 2 picks exactly the Patcher-hosted synth.
+        let (positions, _) = filter_plans_by_rows(&plans, &[2]);
+        assert_eq!(positions, vec![1]);
+    }
+
+    #[test]
+    fn apply_converts_only_the_serum_node_inside_a_patcher() {
+        let buf = patcher_flp(&[
+            ("Vital", "Vital", vital()),
+            ("Serum", "Lead", serum1_payload("Serum", S1_FILE)),
+        ]);
+        let plans = scan_convertible_detailed(&buf).unwrap().0;
+        let bundle = test_bundle(300);
+        let (out, rep) = apply(&buf, &plans, &[Some(bundle.clone())]).unwrap();
+        assert_eq!(fldt_len(&out), out.len() - 22);
+        assert_eq!(&out[..18], &buf[..18]);
+
+        let old = flp::parse_events(&buf).unwrap();
+        let new = flp::parse_events(&out).unwrap();
+        assert_eq!(old.len(), new.len());
+        for (i, (o, n)) in old.iter().zip(&new).enumerate() {
+            if i != 2 {
+                assert_eq!((o.id, o.data), (n.id, n.data), "event {i}");
+            }
+        }
+
+        // Report: new_payload_len is the new PLUGIN payload, not the event.
+        let expect = build_serum2_payload(&plans[0].payload, &bundle).unwrap();
+        assert_eq!(rep.converted.len(), 1);
+        assert_eq!(rep.converted[0].channel_name, "Patch > Lead");
+        assert_eq!(rep.converted[0].new_payload_len, expect.len());
+        assert_ne!(rep.converted[0].new_payload_len, new[2].data.len());
+
+        // Top-level Patcher records: only the Serum node (index 5) differs.
+        let old_recs = records_of(old[2].data, 4);
+        let new_recs = records_of(new[2].data, 4);
+        assert_eq!(
+            old_recs.iter().map(|r| r.0).collect::<Vec<_>>(),
+            new_recs.iter().map(|r| r.0).collect::<Vec<_>>()
+        );
+        for (i, (o, n)) in old_recs.iter().zip(&new_recs).enumerate() {
+            if i != 5 {
+                assert_eq!(o.1, n.1, "Patcher record {i} changed");
+            }
+        }
+        // Inside that node: only 5005 (state) and 5008 (name) differ.
+        let old_node = records_of(&old_recs[5].1, 0);
+        let new_node = records_of(&new_recs[5].1, 0);
+        assert_eq!(
+            old_node.iter().map(|r| r.0).collect::<Vec<_>>(),
+            new_node.iter().map(|r| r.0).collect::<Vec<_>>()
+        );
+        for (o, n) in old_node.iter().zip(&new_node) {
+            match o.0 {
+                5005 => assert_eq!(n.1, expect),
+                5008 => assert_eq!(n.1, crate::testutil::utf16le("Serum 2")),
+                cid => assert_eq!(o.1, n.1, "node record {cid} changed"),
+            }
+        }
+
+        // Rescan: a Serum2 instance (label kept), nothing left to convert.
+        let sites = patcher::plugin_sites(new[2].data);
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0].payload, vital().as_slice());
+        assert_eq!(sites[1].plugin_name, "Serum 2");
+        assert_eq!(sites[1].labels, vec!["Lead".to_string()]);
+        let (s2, warnings) = crate::core::scan_serum2_instances(&out).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(s2.len(), 1);
+        assert_eq!(s2[0].channel_name, "Patch > Lead");
+        assert!(scan_convertible_detailed(&out).unwrap().0.is_empty());
+        let (instances, stats) = crate::core::scan_serum_instances(&out).unwrap();
+        assert!(instances.is_empty());
+        assert_eq!(stats.serum2_count, 1);
+    }
+
+    #[test]
+    fn apply_converts_several_nodes_and_plain_events_together() {
+        let buf = build_flp(&[
+            (EV_NEW_CHANNEL, vec![0, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("Plain")),
+            (flp::EV_PLUGIN_PARAMS, serum1_payload("Serum", S1_FILE)),
+            (EV_NEW_CHANNEL, vec![1, 0]),
+            (EV_TEXT_CHANNEL_NAME, utf16_name("Patch")),
+            (
+                flp::EV_PLUGIN_PARAMS,
+                patcher_event(
+                    &[
+                        patcher_plugin_node(0x3ec, "Serum", "A", &serum1_payload("Serum", S1_FILE)),
+                        patcher_plugin_node(0x3f5, "Vital", "V", &vital()),
+                        patcher_plugin_node(0x3fe, "Serum", "B", &serum1_payload("Serum", S1_FILE)),
+                    ],
+                    &[0x3ec, 0x3f5, 0x3fe],
+                ),
+            ),
+        ]);
+        let plans = scan_convertible_detailed(&buf).unwrap().0;
+        assert_eq!(plans.len(), 3);
+        let bundles: Vec<_> = (0..3).map(|i| Some(test_bundle(10 * (i + 1)))).collect();
+        let (out, rep) = apply(&buf, &plans, &bundles).unwrap();
+        assert_eq!(rep.converted.len(), 3);
+        assert_eq!(fldt_len(&out), out.len() - 22);
+        let new = flp::parse_events(&out).unwrap();
+        let sites = patcher::plugin_sites(new[5].data);
+        assert_eq!(sites.len(), 3);
+        assert_eq!(sites[0].plugin_name, "Serum 2");
+        assert_eq!(sites[1].plugin_name, "Vital");
+        assert_eq!(sites[1].payload, vital().as_slice());
+        assert_eq!(sites[2].plugin_name, "Serum 2");
+        // Each node got its own bundle.
+        for (n, (site, plan)) in [&sites[0], &sites[2]].iter().zip(&plans[1..]).enumerate() {
+            let expect =
+                build_serum2_payload(&plan.payload, bundles[n + 1].as_ref().unwrap()).unwrap();
+            assert_eq!(site.payload, expect.as_slice());
+        }
+        let (s2, _) = crate::core::scan_serum2_instances(&out).unwrap();
+        assert_eq!(
+            s2.iter()
+                .map(|i| i.channel_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Plain", "Patch > A", "Patch > B"]
+        );
+        // A skipped (None) bundle leaves its node untouched.
+        let (out2, rep2) = apply(
+            &buf,
+            &plans,
+            &[Some(test_bundle(0)), None, Some(test_bundle(0))],
+        )
+        .unwrap();
+        assert_eq!(rep2.converted.len(), 2);
+        assert_eq!(rep2.warnings.len(), 1);
+        let new2 = flp::parse_events(&out2).unwrap();
+        let sites2 = patcher::plugin_sites(new2[5].data);
+        assert_eq!(sites2[0].plugin_name, "Serum");
+        assert_eq!(sites2[0].payload, plans[1].payload.as_slice());
+        assert_eq!(sites2[2].plugin_name, "Serum 2");
+    }
+
+    #[test]
+    fn apply_with_no_bundles_is_identity_inside_a_patcher() {
+        let buf = patcher_flp(&[("Serum", "Lead", serum1_payload("Serum", S1_FILE))]);
+        let plans = scan_convertible_detailed(&buf).unwrap().0;
+        let (out, rep) = apply(&buf, &plans, &[None]).unwrap();
+        assert_eq!(out, buf);
+        assert!(rep.converted.is_empty());
+    }
+
+    #[test]
+    fn apply_rejects_stale_patcher_plans() {
+        let buf = patcher_flp(&[("Serum", "Lead", serum1_payload("Serum", S1_FILE))]);
+        let plans = scan_convertible_detailed(&buf).unwrap().0;
+        let some = [Some(test_bundle(0))];
+
+        // Same shape, different plugin state in the node.
+        let other = patcher_flp(&[(
+            "Serum",
+            "Lead",
+            serum1_payload_with("Serum", S1_FILE, b"another state".to_vec()),
+        )]);
+        let err = apply(&other, &plans, &some).unwrap_err();
+        assert!(err.contains("stale"), "{err}");
+
+        // Node path that does not exist / is not a node / is on a plain event.
+        for path in [vec![99], vec![0], vec![5, 4], Vec::new()] {
+            let mut bad = plans.clone();
+            bad[0].node_path = path.clone();
+            assert!(apply(&buf, &bad, &some).is_err(), "path {path:?}");
+        }
+
+        // The same node planned twice cannot be edited twice.
+        let twice = [plans[0].clone(), plans[0].clone()];
+        assert!(apply(&buf, &twice, &[some[0].clone(), some[0].clone()]).is_err());
+    }
+
+    #[test]
+    fn serum_fx_inside_a_patcher_is_left_untouched() {
+        let buf = patcher_flp(&[("Serum FX", "Fx", serum1_payload("Serum FX", FX_FILE))]);
+        let (plans, warnings) = scan_convertible_detailed(&buf).unwrap();
+        assert!(plans.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("'Patch > Fx'"), "{}", warnings[0]);
+        assert!(warnings[0].contains("left untouched"));
+        let (out, rep) = apply(&buf, &plans, &[]).unwrap();
+        assert_eq!(out, buf);
+        assert!(rep.converted.is_empty());
+        // The core scan still lists it as a (non-convertible) Serum row.
+        let (instances, _) = crate::core::scan_serum_instances(&buf).unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].channel_name, "Patch > Fx");
+    }
+
+    #[test]
+    fn serum2_inside_a_patcher_is_counted_not_planned() {
+        let buf = patcher_flp(&[("Serum 2", "Pad", serum2_payload("Serum2", S2_FILE))]);
+        let (plans, warnings) = scan_convertible_detailed(&buf).unwrap();
+        assert!(plans.is_empty());
+        assert!(warnings.is_empty());
+        let (instances, stats) = crate::core::scan_serum_instances(&buf).unwrap();
+        assert!(instances.is_empty());
+        assert_eq!(stats.serum2_count, 1);
+        let (s2, warnings) = crate::core::scan_serum2_instances(&buf).unwrap();
+        assert!(warnings.is_empty());
+        assert_eq!(s2.len(), 1);
+        assert_eq!(s2[0].channel_name, "Patch > Pad");
+        assert_eq!(s2[0].plugin_name, "Serum2");
+        assert_eq!(s2[0].processor, b"XferJson\0proc");
+        assert_eq!(s2[0].controller, b"XferJson\0ctrl");
+    }
+
+    #[test]
+    fn patch_flp_updates_serum_inside_a_patcher() {
+        let buf = patcher_flp(&[
+            ("Vital", "Vital", vital()),
+            ("Serum", "Lead", serum1_payload("Serum", S1_FILE)),
+        ]);
+        let (out, rep) =
+            patch_serum_metadata(&buf, &[fxp::PatchField::Name("Renamed".into())]).unwrap();
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+        assert_eq!(rep.patched.len(), 1);
+        assert_eq!(rep.patched[0].channel_name, "Patch > Lead");
+        assert_eq!(rep.patched[0].old_preset_name, "TestPreset");
+        assert_eq!(rep.patched[0].new_preset_name, "Renamed");
+        assert_eq!(fldt_len(&out), out.len() - 22);
+
+        let old = flp::parse_events(&buf).unwrap();
+        let new = flp::parse_events(&out).unwrap();
+        for (i, (o, n)) in old.iter().zip(&new).enumerate() {
+            if i != 2 {
+                assert_eq!((o.id, o.data), (n.id, n.data), "event {i}");
+            }
+        }
+        // Node name / label / other nodes untouched, only the state changed.
+        let sites = patcher::plugin_sites(new[2].data);
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0].payload, vital().as_slice());
+        assert_eq!(sites[1].plugin_name, "Serum");
+        assert_eq!(sites[1].labels, vec!["Lead".to_string()]);
+        let (instances, _) = crate::core::scan_serum_instances(&out).unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].chunk.meta.preset_name, "Renamed");
+        assert_eq!(instances[0].channel_name, "Patch > Lead");
+        // Top-level records other than the Serum node are byte-identical.
+        let old_recs = records_of(old[2].data, 4);
+        let new_recs = records_of(new[2].data, 4);
+        for (i, (o, n)) in old_recs.iter().zip(&new_recs).enumerate() {
+            if i != 5 {
+                assert_eq!(o.1, n.1, "Patcher record {i} changed");
+            }
+        }
+    }
+
+    #[test]
+    fn patch_flp_without_serum_in_a_patcher_is_a_no_op() {
+        let buf = patcher_flp(&[
+            ("Vital", "Vital", vital()),
+            ("Serum 2", "Pad", serum2_payload("Serum2", S2_FILE)),
+        ]);
+        let (out, rep) = patch_serum_metadata(&buf, &[fxp::PatchField::Name("X".into())]).unwrap();
+        assert_eq!(out, buf);
+        assert!(rep.patched.is_empty());
+        assert!(rep.warnings.is_empty());
+    }
+
+    #[test]
+    fn patch_flp_serum_fx_inside_a_patcher_warns_and_skips() {
+        let buf = patcher_flp(&[("Serum FX", "Fx", serum1_payload("Serum FX", FX_FILE))]);
+        let (out, rep) = patch_serum_metadata(&buf, &[fxp::PatchField::Name("X".into())]).unwrap();
+        assert_eq!(out, buf);
+        assert!(rep.patched.is_empty());
+        assert_eq!(rep.warnings.len(), 1);
+        assert!(
+            rep.warnings[0].contains("'Patch > Fx'"),
+            "{}",
+            rep.warnings[0]
+        );
     }
 }
